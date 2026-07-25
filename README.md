@@ -3,8 +3,8 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 1** — a streaming REPL. Each turn is independent; there is no
-conversation history and no tool use yet.
+**Status: Stage 2** — a streaming REPL with conversation history and per-turn
+token accounting. No tool use yet.
 
 ## Setup
 
@@ -28,8 +28,18 @@ github:openai/gpt-4.1 — /exit or Ctrl-D to quit, Ctrl-C cancels a turn
 
 Type a message, press Enter, and the reply streams back token by token.
 
+After each reply a usage line goes to stderr:
+
+```
+[in 28 · out 3 · 4 msgs in context]
+```
+
+`in` counts the whole re-sent history, so it grows every turn — that is the
+cost of context, made visible. `cached` and `cache-write` appear when non-zero.
+
 | Input | Effect |
 |---|---|
+| `/clear` | Forget the conversation and start fresh |
 | `/exit`, `/quit` | Quit (exit code 0) |
 | `Ctrl-D` | Quit — only on an empty prompt |
 | `Ctrl-C` | Cancel the current answer, return to the prompt |
