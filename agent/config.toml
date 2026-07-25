@@ -1,5 +1,5 @@
 # Active provider. Override at runtime with AGENT_PROVIDER=openai
-provider = "anthropic"
+provider = "github"
 
 [providers.anthropic]
 kind = "anthropic"

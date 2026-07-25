@@ -15,7 +15,7 @@ def main() -> int:
 
     provider = build(cfg)
     print(
-        f"{cfg.profile}:{cfg.model} — Ctrl-C cancels a turn, Ctrl-D exits",
+        f"{cfg.profile}:{cfg.model} — /exit or Ctrl-D to quit, Ctrl-C cancels a turn",
         file=sys.stderr,
     )
 
@@ -29,8 +29,11 @@ def main() -> int:
             print(file=sys.stderr)
             continue
 
-        if not prompt.strip():
+        prompt = prompt.strip()
+        if not prompt:
             continue
+        if prompt in ("/exit", "/quit"):
+            return 0
 
         try:
             for text in provider.stream(prompt):
