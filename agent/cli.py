@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import sys
 
+from . import loop
 from .config import ConfigError, load
-from .providers import STREAM_ERRORS, Message, Usage, build
+from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
+from .tools import REGISTRY
 
 
-def _usage_line(usage: Usage, turns: int) -> str:
-    parts = [f"in {usage.input_tokens}", f"out {usage.output_tokens}"]
-    if usage.cache_read:
-        parts.append(f"cached {usage.cache_read}")
-    if usage.cache_write:
-        parts.append(f"cache-write {usage.cache_write}")
-    parts.append(f"{turns} msgs in context")
+def _usage_line(usages: list[Usage], msgs: int) -> str:
+    parts = [
+        f"in {sum(u.input_tokens for u in usages)}",
+        f"out {sum(u.output_tokens for u in usages)}",
+    ]
+    cached = sum(u.cache_read for u in usages)
+    written = sum(u.cache_write for u in usages)
+    if cached:
+        parts.append(f"cached {cached}")
+    if written:
+        parts.append(f"cache-write {written}")
+    if len(usages) > 1:
+        parts.append(f"{len(usages)} api calls")
+    parts.append(f"{msgs} msgs in context")
     return " · ".join(parts)
 
 
@@ -24,8 +33,10 @@ def main() -> int:
         return 2
 
     provider = build(cfg)
+    toolset = list(REGISTRY.values())
     print(
-        f"{cfg.profile}:{cfg.model} — /clear resets history, "
+        f"{cfg.profile}:{cfg.model} · {len(toolset)} tool{'s' * (len(toolset) != 1)} — "
+        "/clear resets history, "
         "/exit or Ctrl-D quits, Ctrl-C cancels a turn",
         file=sys.stderr,
     )
@@ -52,32 +63,37 @@ def main() -> int:
             print("[history cleared]", file=sys.stderr)
             continue
 
+        # A tool turn appends several messages; rollback truncates to here.
+        mark = len(history)
         history.append({"role": "user", "content": prompt})
-        reply: list[str] = []
 
         def emit(text: str) -> None:
-            reply.append(text)
             sys.stdout.write(text)
             sys.stdout.flush()
 
+        def on_tool(call: ToolCall, result: ToolResult) -> None:
+            arrow = "!!" if result.is_error else "->"
+            print(
+                f"\n[tool] {call.name}({call.args}) {arrow} {result.content}",
+                file=sys.stderr,
+            )
+
         try:
-            usage = provider.run(history, emit)
+            usages = loop.run_turn(provider, history, toolset, emit, on_tool)
         except KeyboardInterrupt:
-            history.pop()
+            del history[mark:]
             print("\n[cancelled — turn discarded]", file=sys.stderr)
             continue
+        except loop.MaxIterations as e:
+            del history[mark:]
+            print(f"\n[{e} — turn discarded]", file=sys.stderr)
+            continue
         except STREAM_ERRORS as e:
-            history.pop()
+            del history[mark:]
             sys.stdout.flush()
             print(f"\n[{type(e).__name__}] {e}", file=sys.stderr)
             continue
 
         print()
-        if not reply:
-            history.pop()
-            print("[empty response — turn discarded]", file=sys.stderr)
-            continue
-
-        history.append({"role": "assistant", "content": "".join(reply)})
-        if usage:
-            print(f"[{_usage_line(usage, len(history))}]", file=sys.stderr)
+        if usages:
+            print(f"[{_usage_line(usages, len(history))}]", file=sys.stderr)

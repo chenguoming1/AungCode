@@ -3,8 +3,12 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 2** — a streaming REPL with conversation history and per-turn
-token accounting. No tool use yet.
+**Status: Stage 3** — a streaming REPL with conversation history, per-turn
+token accounting, and a tool-use loop.
+
+Tools live in [`agent/tools.py`](agent/tools.py). Adding one is a dict entry in
+`REGISTRY`: a name, a description written for the model, a JSON Schema, and a
+callable. Nothing else in the codebase needs to change.
 
 ## Setup
 
