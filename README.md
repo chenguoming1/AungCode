@@ -3,12 +3,30 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 3** — a streaming REPL with conversation history, per-turn
-token accounting, and a tool-use loop.
+**Status: Stage 4** — a streaming REPL with conversation history, per-turn
+token accounting, a tool-use loop, and workspace-confined file tools
+(`list_files`, `read_file`, `write_file`, `get_current_time`).
 
-Tools live in [`agent/tools.py`](agent/tools.py). Adding one is a dict entry in
-`REGISTRY`: a name, a description written for the model, a JSON Schema, and a
-callable. Nothing else in the codebase needs to change.
+Tools live in [`agent/tools.py`](agent/tools.py). Adding one is an entry in
+`build_registry`: a name, a description written for the model, a JSON Schema,
+and a callable. Nothing else in the codebase needs to change.
+
+## Workspace
+
+File tools are confined to one directory — the current directory by default,
+or `AGENT_WORKSPACE`:
+
+```bash
+AGENT_WORKSPACE=~/code/myproject .venv/bin/python -m agent
+```
+
+The root is printed at startup. Every model-supplied path goes through
+`Workspace.resolve()`, which resolves symlinks and `..` before checking
+containment, so neither can escape.
+
+> **The agent can read every file under that root**, including `.env` and any
+> credentials, and send the contents to your provider. Point it at a project
+> directory, not your home directory.
 
 ## Setup
 

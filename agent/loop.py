@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .providers import Emit, Message, Provider, ToolCall, ToolResult, Usage
-from .tools import Tool
+from .tools import Tool, ToolError
 
 MAX_ITERATIONS = 8
 
@@ -24,6 +24,9 @@ def _execute(call: ToolCall, registry: dict[str, Tool]) -> ToolResult:
 
     try:
         return ToolResult(call.id, tool.run(call.args))
+    except ToolError as e:
+        # Expected failure — the model reads this and adjusts.
+        return ToolResult(call.id, f"error: {e}", is_error=True)
     except Exception as e:
         # A broken tool must not end the session: hand the failure back and
         # let the model decide what to do about it.

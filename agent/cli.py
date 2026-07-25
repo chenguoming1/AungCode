@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import sys
 
+import os
+from pathlib import Path
+
 from . import loop
 from .config import ConfigError, load
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
-from .tools import REGISTRY
+from .tools import Workspace, build_registry
+
+
+def _preview(text: str, width: int = 96) -> str:
+    """Tool results can be whole files; keep the transcript readable."""
+    first, _, rest = text.partition("\n")
+    if len(first) > width:
+        first = first[:width] + "…"
+    extra = text.count("\n")
+    return f"{first} (+{extra} lines)" if rest else first
 
 
 def _usage_line(usages: list[Usage], msgs: int) -> str:
@@ -33,13 +45,19 @@ def main() -> int:
         return 2
 
     provider = build(cfg)
-    toolset = list(REGISTRY.values())
+    workspace = Workspace(Path(os.environ.get("AGENT_WORKSPACE", ".")).resolve())
+    if not workspace.root.is_dir():
+        print(f"config error: workspace {workspace.root} is not a directory", file=sys.stderr)
+        return 2
+    toolset = list(build_registry(workspace).values())
+
     print(
         f"{cfg.profile}:{cfg.model} · {len(toolset)} tool{'s' * (len(toolset) != 1)} — "
         "/clear resets history, "
         "/exit or Ctrl-D quits, Ctrl-C cancels a turn",
         file=sys.stderr,
     )
+    print(f"workspace: {workspace.root}", file=sys.stderr)
 
     history: list[Message] = []
 
@@ -74,7 +92,7 @@ def main() -> int:
         def on_tool(call: ToolCall, result: ToolResult) -> None:
             arrow = "!!" if result.is_error else "->"
             print(
-                f"\n[tool] {call.name}({call.args}) {arrow} {result.content}",
+                f"\n[tool] {call.name}({call.args}) {arrow} {_preview(result.content)}",
                 file=sys.stderr,
             )
 
