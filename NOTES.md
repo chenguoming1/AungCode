@@ -185,10 +185,35 @@ Backend check: `which rg`. With ripgrep installed the summary reads
 `(ripgrep)`, without it `(python re)`. Results should be identical either way —
 if they differ, the parity flags are wrong.
 
+## Stage 9 — system prompt + AGENT.md
+
+```bash
+mkdir -p /tmp/p9/src /tmp/p9/tests && cd /tmp/p9
+printf 'x\n' > src/main.py && printf 'x\n' > tests/test_main.py && printf 'SECRET=1\n' > .env
+cat > AGENT.md <<'EOF'
+# House rules
+
+- Every Python module must begin with the line `# (c) ACME` as its first line.
+- Never run `pytest` directly; this project uses `make test`.
+EOF
+cd /Users/aungbonaing/develop/personal/Apps/AungCode
+AGENT_WORKSPACE=/tmp/p9 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | Read the banner | `workspace: /private/tmp/p9 · AGENT.md loaded` |
+| 2 | `/system` | Role, then `# Environment` with cwd + platform, then a depth-2 tree, then the AGENT.md rules |
+| 3 | Check the tree in that output | No `.env`, no `.git`, no `node_modules`; nothing deeper than two levels |
+| 4 | `create src/util.py with a function double(n)` | The written file starts with `# (c) ACME` — AGENT.md was obeyed |
+| 5 | `run the test suite` | It tries `make test`, not `pytest` |
+| 6 | `/clear`, then `/system` | Prompt is unchanged — it lives outside history |
+| 7 | `rm /tmp/p9/AGENT.md`, restart | Banner no longer says `AGENT.md loaded`; `/system` ends at the tree |
+
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9
 ```

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import loop
 from .config import ConfigError, load
+from .prompt import AGENT_FILE, build_system
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
 from .tools import ToolError, Workspace, build_registry
 
@@ -147,14 +148,19 @@ def main() -> int:
         print(f"config error: workspace {workspace.root} is not a directory", file=sys.stderr)
         return 2
     toolset = list(build_registry(workspace).values())
+    system, has_agent_file = build_system(workspace)
 
     print(
         f"{cfg.profile}:{cfg.model} · {len(toolset)} tool{'s' * (len(toolset) != 1)} — "
-        "/clear resets history, "
+        "/clear resets history, /system shows the prompt, "
         "/exit or Ctrl-D quits, Ctrl-C cancels a turn",
         file=sys.stderr,
     )
-    print(f"workspace: {workspace.root}", file=sys.stderr)
+    print(
+        f"workspace: {workspace.root}"
+        + (f" · {AGENT_FILE} loaded" if has_agent_file else ""),
+        file=sys.stderr,
+    )
     if APPROVE_ALL:
         print("AGENT_APPROVE_ALL=1 — every action runs unattended", file=sys.stderr)
 
@@ -182,6 +188,9 @@ def main() -> int:
             history.clear()
             print("[history cleared]", file=sys.stderr)
             continue
+        if prompt == "/system":
+            print(system, file=sys.stderr)
+            continue
 
         # A tool turn appends several messages; rollback truncates to here.
         mark = len(history)
@@ -202,7 +211,9 @@ def main() -> int:
                 print(_colorize(result.display), file=sys.stderr)
 
         try:
-            usages = loop.run_turn(provider, history, toolset, emit, on_tool, approve)
+            usages = loop.run_turn(
+                provider, history, toolset, emit, on_tool, approve, system
+            )
         except KeyboardInterrupt:
             del history[mark:]
             print("\n[cancelled — turn discarded]", file=sys.stderr)

@@ -57,7 +57,9 @@ class Step:
 
 
 class Provider(Protocol):
-    def step(self, messages: list[Message], tools: list[Tool], emit: Emit) -> Step:
+    def step(
+        self, messages: list[Message], tools: list[Tool], emit: Emit, system: str
+    ) -> Step:
         """One API call. Appends the assistant turn to `messages` in place."""
 
     def append_results(self, messages: list[Message], results: list[ToolResult]) -> None:
@@ -69,10 +71,20 @@ class AnthropicProvider:
         self._cfg = cfg
         self._client = anthropic.Anthropic(api_key=cfg.api_key, base_url=cfg.base_url)
 
-    def step(self, messages: list[Message], tools: list[Tool], emit: Emit) -> Step:
+    def step(
+        self, messages: list[Message], tools: list[Tool], emit: Emit, system: str
+    ) -> Step:
         with self._client.messages.stream(
             model=self._cfg.model,
             max_tokens=self._cfg.max_tokens,
+            # Stable across the session, so it belongs in the cached prefix.
+            system=[
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=messages,
             tools=[
                 {
@@ -133,7 +145,9 @@ class OpenAIProvider:
 
     _FINISH = {"tool_calls": "tool_use", "stop": "end_turn", "length": "max_tokens"}
 
-    def step(self, messages: list[Message], tools: list[Tool], emit: Emit) -> Step:
+    def step(
+        self, messages: list[Message], tools: list[Tool], emit: Emit, system: str
+    ) -> Step:
         raw = None
         finish = "stop"
         text: list[str] = []
@@ -142,7 +156,8 @@ class OpenAIProvider:
 
         with self._client.chat.completions.create(
             model=self._cfg.model,
-            messages=messages,
+            # Prepend to a copy — the stored history holds no system message.
+            messages=[{"role": "system", "content": system}, *messages],
             stream=True,
             # Without this, a streamed response carries no usage at all.
             stream_options={"include_usage": True},

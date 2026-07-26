@@ -3,11 +3,29 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 8** — a streaming REPL with conversation history, per-turn
-token accounting, a tool-use loop, discovery tools (`glob`, `grep`), file
-tools (`list_files`, `read_file`, `write_file`, `edit_file`), a `bash` tool,
-`get_current_time`, and an approval prompt before anything that mutates the
-machine. Successful edits print a unified diff to the terminal.
+**Status: Stage 9** — a streaming REPL with a system prompt, conversation
+history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
+`grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
+`bash` tool, `get_current_time`, and an approval prompt before anything that
+mutates the machine. Successful edits print a unified diff to the terminal.
+
+## System prompt
+
+Built once at startup from three parts, and printable at any time with
+`/system`:
+
+1. **Role and tool policy** — `ROLE` in [`agent/prompt.py`](agent/prompt.py):
+   search before reading, read before editing, `edit_file` over `write_file`,
+   `bash` for running things rather than reading them.
+2. **Environment** — working directory, OS and architecture, and a depth-2
+   file tree so the agent starts oriented instead of spending its first calls
+   on `list_files`. Hidden entries are left out, so a `.env` is never named.
+3. **`AGENT.md`** — if the file exists in the workspace root it is appended,
+   marked as taking precedence over the general guidance.
+
+The prompt sits outside the message history: `/clear` does not touch it, and
+on Anthropic it is marked cacheable, since the same bytes are re-sent every
+call.
 
 `grep` uses [ripgrep](https://github.com/BurntSushi/ripgrep) when `rg` is on
 PATH and falls back to Python's `re` otherwise. Both backends are told to

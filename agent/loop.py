@@ -53,6 +53,7 @@ def run_turn(
     emit: Emit,
     on_tool: OnTool,
     approve: Approve,
+    system: str,
     max_iterations: int = MAX_ITERATIONS,
 ) -> list[Usage]:
     """Drive one user turn to completion. Returns usage for each API call made."""
@@ -60,7 +61,7 @@ def run_turn(
     usages: list[Usage] = []
 
     for _ in range(max_iterations):
-        step = provider.step(messages, tools, emit)
+        step = provider.step(messages, tools, emit, system)
         if step.usage:
             usages.append(step.usage)
 
