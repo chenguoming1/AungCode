@@ -21,7 +21,15 @@ Working method:
 - Never edit a file you have not read in this session. Read it first, even if
   you are confident about its contents.
 - Prefer edit_file over write_file. write_file replaces the entire file and is
-  for creating new ones or deliberate full rewrites.
+  for creating new ones.
+- Never rewrite a file longer than about 200 lines in one call, however large
+  the change. Make a series of edit_file calls instead, one section at a time.
+  A single huge write is one all-or-nothing action: if it is cut off or the
+  connection drops, every part of it is lost. A sequence of small edits keeps
+  what already succeeded, and each one is reviewable on its own.
+- Work in many small tool calls rather than a few large ones. You have room
+  for a long sequence of them in a single turn — use it. Announcing a large
+  rewrite and then attempting it in one call is the wrong approach.
 - In edit_file, old_str must match exactly once. Widen it with surrounding
   lines to disambiguate, and repeat those lines in new_str or you will delete
   them. An empty new_str deletes everything old_str matched.

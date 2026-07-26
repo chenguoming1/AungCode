@@ -1,17 +1,31 @@
 # Active provider. Override at runtime with AGENT_PROVIDER=openai
 provider = "github"
 
+# max_tokens caps a single response. You are billed for tokens generated, not
+# for the cap, so a generous value costs nothing until it is used. The values
+# below are deliberately below each model's ceiling (noted per profile) — a
+# runaway response at the true maximum would be slow and expensive.
+#
+# context_window drives compaction, which fires at 75% of it. Setting it too
+# low only compacts earlier than needed; setting it too high overruns the real
+# limit and fails hard. When unsure, go low.
+
 [providers.anthropic]
 kind = "anthropic"
 model = "claude-opus-4-8"
 api_key_env = "ANTHROPIC_API_KEY"
-max_tokens = 8192
+# Model ceiling: 128000 output, 1M context.
+max_tokens = 64000
+context_window = 1000000
 
 [providers.openai]
 kind = "openai"
 model = "gpt-5"
 api_key_env = "OPENAI_API_KEY"
-max_tokens = 8192
+# Unverified against OpenAI's direct API — conservative figures. Raise once
+# you have checked the limits for your account and model.
+max_tokens = 32768
+context_window = 200000
 # Newer OpenAI models reject `max_tokens` and want this instead.
 token_param = "max_completion_tokens"
 
@@ -20,7 +34,9 @@ kind = "openai"
 model = "deepseek-v4-flash"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
-max_tokens = 8192
+# Model ceiling: 384000 output, 1M context (api-docs.deepseek.com pricing).
+max_tokens = 32768
+context_window = 1000000
 
 # GitHub Models. Needs a PAT with the `models:read` scope.
 # Model ids are publisher/model — see https://models.github.ai/catalog/models
@@ -30,4 +46,6 @@ kind = "openai"
 model = "openai/gpt-4.1"
 api_key_env = "GITHUB_TOKEN"
 base_url = "https://models.github.ai/inference"
-max_tokens = 8192
+# 32768 is this model's actual maximum output; context is 1048576.
+max_tokens = 32768
+context_window = 1000000

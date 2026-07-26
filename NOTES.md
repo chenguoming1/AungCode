@@ -210,6 +210,30 @@ AGENT_WORKSPACE=/tmp/p9 .venv/bin/python -m agent
 | 6 | `/clear`, then `/system` | Prompt is unchanged — it lives outside history |
 | 7 | `rm /tmp/p9/AGENT.md`, restart | Banner no longer says `AGENT.md loaded`; `/system` ends at the tree |
 
+## Stage 10 — compaction
+
+Any workspace will do; compaction is about history, not files.
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | Send any turn, read the usage line | `ctx N/W (P%)` and `session N` are present |
+| 2 | Send several more turns | `ctx` climbs, `session` climbs faster (it counts every call, cached or not) |
+| 3 | `remember: my deploy target is fly.io and the magic number is 8823`, then 4 throwaway turns | — |
+| 4 | `/compact` | `[compacted N messages into a summary; M msgs now, last 4 turns kept verbatim]`, and `msgs` drops sharply |
+| 5 | `what is my deploy target and the magic number?` | Still correct — the facts survived in the summary |
+| 6 | `/compact` twice more in a row | Both say `[nothing to compact — fewer than 4 earlier turns]` and `msgs` does **not** change. Regression: the synthetic summary used to count as a user turn, so each `/compact` re-summarized its own summary — a paid API call that changed nothing |
+| 7 | Ask for the **exact wording** of an early turn | It cannot reproduce it. That is the cost, not a bug |
+| 8 | Lower `context_window` in `agent/config.toml` to e.g. `3000`, restart, send 2 turns | Auto-compaction fires: `[context N over the M threshold]` |
+
+Cut-point safety (no API key needed):
+
+```bash
+.venv/bin/python -c "
+from agent.compact import find_cut
+h=[{'role':'user','content':f'q{i}'} if i%2==0 else {'role':'assistant','content':'a'} for i in range(20)]
+c=find_cut(h,4); print('cut',c,'role',h[c]['role'],'plain str',isinstance(h[c]['content'],str))"
+```
+
 ---
 
 ## Cleanup

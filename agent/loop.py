@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
-from .providers import Emit, Message, Provider, ToolCall, ToolResult, Usage
+from .providers import RETRYABLE, Emit, Message, Provider, ToolCall, ToolResult, Usage
 from .tools import Tool, ToolError, ToolOutput
 
-MAX_ITERATIONS = 8
+log = logging.getLogger(__name__)
+
+MAX_ITERATIONS = 100
+STREAM_RETRIES = 2
 
 OnTool = Callable[[ToolCall, ToolResult], None]
 # Returns True to let the call proceed. Asked once per call, before execution.
@@ -14,6 +20,12 @@ Approve = Callable[[ToolCall], bool]
 
 class MaxIterations(RuntimeError):
     """The model kept calling tools past the allowed number of round trips."""
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    usages: list[Usage] = field(default_factory=list)
+    stop_reason: str = "end_turn"
 
 
 def _execute(call: ToolCall, registry: dict[str, Tool], approve: Approve) -> ToolResult:
@@ -41,9 +53,36 @@ def _execute(call: ToolCall, registry: dict[str, Tool], approve: Approve) -> Too
         # Expected failure — the model reads this and adjusts.
         return ToolResult(call.id, f"error: {e}", is_error=True)
     except Exception as e:
-        # A broken tool must not end the session: hand the failure back and
-        # let the model decide what to do about it.
+        # Unexpected: this is a bug in the tool, not a usage error. Hand a
+        # message back so the session continues, but log the traceback so the
+        # failure is never silently swallowed.
+        log.exception("tool %r raised an unexpected exception", call.name)
         return ToolResult(call.id, f"error: {type(e).__name__}: {e}", is_error=True)
+
+
+def _step_with_retry(
+    provider: Provider, messages: list[Message], tools: list[Tool], emit: Emit, system: str
+):
+    """Retry transient stream failures, undoing anything a failed call appended."""
+    for attempt in range(STREAM_RETRIES + 1):
+        mark = len(messages)
+        try:
+            return provider.step(messages, tools, emit, system)
+        except RETRYABLE as e:
+            del messages[mark:]  # a half-written assistant turn must not survive
+            if attempt == STREAM_RETRIES:
+                raise
+            delay = 2**attempt
+            log.warning(
+                "%s: %s — retrying in %ss (attempt %d of %d). "
+                "Any text already printed above was discarded.",
+                type(e).__name__,
+                e,
+                delay,
+                attempt + 2,
+                STREAM_RETRIES + 1,
+            )
+            time.sleep(delay)
 
 
 def run_turn(
@@ -55,18 +94,18 @@ def run_turn(
     approve: Approve,
     system: str,
     max_iterations: int = MAX_ITERATIONS,
-) -> list[Usage]:
+) -> TurnResult:
     """Drive one user turn to completion. Returns usage for each API call made."""
     registry = {t.name: t for t in tools}
     usages: list[Usage] = []
 
     for _ in range(max_iterations):
-        step = provider.step(messages, tools, emit, system)
+        step = _step_with_retry(provider, messages, tools, emit, system)
         if step.usage:
             usages.append(step.usage)
 
         if step.stop_reason != "tool_use" or not step.tool_calls:
-            return usages
+            return TurnResult(usages, step.stop_reason)
 
         results = []
         for call in step.tool_calls:

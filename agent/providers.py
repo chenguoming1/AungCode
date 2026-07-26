@@ -6,16 +6,31 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import anthropic
+import httpx
 import openai
 
 from .config import ProviderConfig
 from .tools import Tool
 
-# Every network/API failure either SDK raises descends from one of these.
-STREAM_ERRORS = (anthropic.AnthropicError, openai.OpenAIError)
+# Both SDKs wrap transport failures when opening a request, but a connection
+# dropped *mid-stream* surfaces as a raw httpx error while iterating chunks —
+# neither SDK base class covers that, and uncaught it kills the REPL.
+STREAM_ERRORS = (anthropic.AnthropicError, openai.OpenAIError, httpx.HTTPError)
+
+# Worth retrying: the request is idempotent and the failure is transient.
+# Rate limits are deliberately excluded — they do not clear in seconds, so
+# retrying would just look like a hang. Fail fast and say so instead.
+RETRYABLE = (
+    httpx.TransportError,
+    anthropic.APIConnectionError,
+    anthropic.InternalServerError,
+    openai.APIConnectionError,
+    openai.InternalServerError,
+)
 
 Message = dict[str, Any]
 Emit = Callable[[str], None]
+SUMMARY_MAX_TOKENS = 2048
 
 
 @dataclass(frozen=True)
@@ -65,6 +80,9 @@ class Provider(Protocol):
     def append_results(self, messages: list[Message], results: list[ToolResult]) -> None:
         """Append tool results in this provider's wire format."""
 
+    def summarize(self, text: str, instruction: str) -> str:
+        """One-shot completion used for compaction. No tools, no streaming."""
+
 
 class AnthropicProvider:
     def __init__(self, cfg: ProviderConfig) -> None:
@@ -99,13 +117,21 @@ class AnthropicProvider:
                 emit(text)
             final = stream.get_final_message()
 
-        # Echoed back verbatim — block ids and any signatures must survive.
-        messages.append({"role": "assistant", "content": final.content})
+        # A turn cut off at max_tokens may hold a half-written tool_use. Its
+        # arguments are unusable, and leaving it unanswered makes every later
+        # request invalid, so drop it rather than orphan it.
+        truncated = final.stop_reason == "max_tokens"
+        blocks = [b for b in final.content if not (truncated and b.type == "tool_use")]
+        if blocks:
+            # Echoed back verbatim — block ids and any signatures must survive.
+            messages.append({"role": "assistant", "content": blocks})
 
         usage = final.usage
         return Step(
             stop_reason=final.stop_reason or "end_turn",
-            tool_calls=[
+            tool_calls=[]
+            if truncated
+            else [
                 ToolCall(id=b.id, name=b.name, args=dict(b.input))
                 for b in final.content
                 if b.type == "tool_use"
@@ -117,6 +143,15 @@ class AnthropicProvider:
                 cache_write=usage.cache_creation_input_tokens or 0,
             ),
         )
+
+    def summarize(self, text: str, instruction: str) -> str:
+        message = self._client.messages.create(
+            model=self._cfg.model,
+            max_tokens=SUMMARY_MAX_TOKENS,
+            system=instruction,
+            messages=[{"role": "user", "content": text}],
+        )
+        return "".join(b.text for b in message.content if b.type == "text").strip()
 
     def append_results(self, messages: list[Message], results: list[ToolResult]) -> None:
         # Every result for one assistant turn goes in a single user message.
@@ -194,8 +229,12 @@ class OpenAIProvider:
                     if frag.function and frag.function.arguments:
                         slot["args"] += frag.function.arguments
 
+        # See the note in AnthropicProvider.step: a tool call truncated at
+        # max_tokens has incomplete arguments and no result can be produced
+        # for it, so it must not reach the history.
+        truncated = finish == "length"
         assistant: Message = {"role": "assistant", "content": "".join(text) or None}
-        if acc:
+        if acc and not truncated:
             assistant["tool_calls"] = [
                 {
                     "id": s["id"],
@@ -204,10 +243,11 @@ class OpenAIProvider:
                 }
                 for _, s in sorted(acc.items())
             ]
-        messages.append(assistant)
+        if assistant["content"] or assistant.get("tool_calls"):
+            messages.append(assistant)
 
         calls = []
-        for _, s in sorted(acc.items()):
+        for _, s in sorted(acc.items()) if not truncated else []:
             try:
                 args = json.loads(s["args"] or "{}")
                 calls.append(ToolCall(id=s["id"], name=s["name"], args=args))
@@ -230,6 +270,17 @@ class OpenAIProvider:
             tool_calls=calls,
             usage=usage,
         )
+
+    def summarize(self, text: str, instruction: str) -> str:
+        response = self._client.chat.completions.create(
+            model=self._cfg.model,
+            messages=[
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": text},
+            ],
+            **{self._cfg.token_param: SUMMARY_MAX_TOKENS},
+        )
+        return (response.choices[0].message.content or "").strip()
 
     def append_results(self, messages: list[Message], results: list[ToolResult]) -> None:
         # One message per result here — the mirror of Anthropic's single batch.

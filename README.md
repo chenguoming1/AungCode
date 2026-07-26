@@ -3,7 +3,7 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 9** — a streaming REPL with a system prompt, conversation
+**Status: Stage 10** — a streaming REPL with a system prompt, conversation
 history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
 `grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
 `bash` tool, `get_current_time`, and an approval prompt before anything that
@@ -26,6 +26,28 @@ Built once at startup from three parts, and printable at any time with
 The prompt sits outside the message history: `/clear` does not touch it, and
 on Anthropic it is marked cacheable, since the same bytes are re-sent every
 call.
+
+## Compaction
+
+The usage line reports the measured prompt size against the model's window:
+
+```
+[in 2468 · out 54 · cached 2048 · 12 msgs · ctx 4.6k/65.5k (6%) · session 27.2k]
+```
+
+At 75% of `context_window` (set per profile in
+[`agent/config.toml`](agent/config.toml)) the older part of the conversation is
+summarized by a separate API call and replaced by a short synthetic exchange.
+The most recent 4 user turns are kept verbatim. `/compact` forces it early.
+
+The cut always lands on a plain user turn, never inside one, because a
+`tool_use` separated from its `tool_result` is rejected by the API.
+
+**What compaction destroys.** Exact file contents, full tool output, precise
+wording of old turns, and the order things happened in. The summary keeps
+goals, decisions, file paths, discovered facts and open threads — everything
+else is gone and cannot be recovered, since the original messages are
+discarded. Re-read a file rather than trusting a remembered version of it.
 
 `grep` uses [ripgrep](https://github.com/BurntSushi/ripgrep) when `rg` is on
 PATH and falls back to Python's `re` otherwise. Both backends are told to
@@ -58,6 +80,8 @@ Tools live in [`agent/tools.py`](agent/tools.py). Adding one is an entry in
 and a callable. Nothing else in the codebase needs to change.
 
 Manual verification steps for every stage are in [NOTES.md](NOTES.md).
+How context, the four caps, compaction and cost fit together — with real
+numbers — is in [CONTEXT.md](CONTEXT.md).
 
 ## Workspace
 

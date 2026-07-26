@@ -21,6 +21,7 @@ class ProviderConfig:
     model: str
     api_key: str
     max_tokens: int
+    context_window: int
     base_url: str | None = None
     token_param: str = "max_tokens"
 
@@ -68,6 +69,7 @@ def load(path: Path | None = None) -> ProviderConfig:
         model=section["model"],
         api_key=api_key,
         max_tokens=int(section.get("max_tokens", 8192)),
+        context_window=int(section.get("context_window", 200_000)),
         base_url=section.get("base_url"),
         token_param=section.get("token_param", "max_tokens"),
     )
