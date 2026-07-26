@@ -3,11 +3,17 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 7** — a streaming REPL with conversation history, per-turn
-token accounting, a tool-use loop, file tools (`list_files`, `read_file`,
-`write_file`, `edit_file`), a `bash` tool, `get_current_time`, and an
-approval prompt before anything that mutates the machine.
-Successful edits print a unified diff to the terminal.
+**Status: Stage 8** — a streaming REPL with conversation history, per-turn
+token accounting, a tool-use loop, discovery tools (`glob`, `grep`), file
+tools (`list_files`, `read_file`, `write_file`, `edit_file`), a `bash` tool,
+`get_current_time`, and an approval prompt before anything that mutates the
+machine. Successful edits print a unified diff to the terminal.
+
+`grep` uses [ripgrep](https://github.com/BurntSushi/ripgrep) when `rg` is on
+PATH and falls back to Python's `re` otherwise. Both backends are told to
+ignore the same directories and to search hidden files, so results do not
+change depending on what is installed. The trailing summary line names the
+backend that ran.
 
 ## Approval
 

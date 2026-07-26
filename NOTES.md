@@ -156,10 +156,39 @@ AGENT_WORKSPACE=/tmp/appr7 .venv/bin/python -m agent
 | 6 | `what files are here and what's in data.txt?` | Zero prompts; read-only tools auto-approve |
 | 7 | Ctrl-C at an approval prompt | Whole turn cancelled and rolled back |
 
+## Stage 8 — glob + grep
+
+```bash
+mkdir -p /tmp/g8/src/deep /tmp/g8/.git /tmp/g8/node_modules && cd /tmp/g8
+printf 'import os\ndef handler(x):\n    return x\n' > src/app.py
+printf 'def handler(y):\n    pass\n' > src/deep/util.py
+printf 'const handler = 1;\n' > src/web.ts
+printf 'handler in git\n' > .git/config
+printf 'handler in node_modules\n' > node_modules/lib.js
+printf 'x = foo([unclosed)\ny = a.b*c\n' > src/tricky.py
+sleep 1 && touch src/app.py     # make it the newest file
+cd /Users/aungbonaing/develop/personal/Apps/AungCode
+AGENT_WORKSPACE=/tmp/g8 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `list every python file` | `glob` call; `src/app.py` first (newest); nothing from `.git` or `node_modules` |
+| 2 | `where is handler defined?` | `grep` call returning `path:line: text`; summary names the backend |
+| 3 | `find handler only in python files` | Uses `include: '*.py'`; `web.ts` absent |
+| 4 | `use the grep tool with the regex pattern ([unclosed` | `!! invalid regex ... Pass literal=true to search for this text exactly` on the **first** call. Phrase it as a tool instruction — "search for `([unclosed`" reads as a literal-text request, so the model escapes it and the guard never fires |
+| 5 | `find the exact text ([unclosed` | Uses `literal: true`, finds `src/tricky.py:1`. It should **not** shell out to bash — if it does, the description stopped steering |
+| 6 | `explore this repo and tell me what it does` | glob/grep **before** read_file, and no approval prompts — both are read-only |
+| 7 | `glob for files in ../` | Escapes the workspace root |
+
+Backend check: `which rg`. With ripgrep installed the summary reads
+`(ripgrep)`, without it `(python re)`. Results should be identical either way —
+if they differ, the parity flags are wrong.
+
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8
 ```

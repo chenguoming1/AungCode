@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import difflib
+import fnmatch
 import os
 import re
+import shutil
 import signal
 import subprocess
 from collections.abc import Callable
@@ -19,6 +21,11 @@ MAX_BASH_LINES = 200
 MAX_BASH_CHARS = 12000
 BASH_TIMEOUT = 60
 MAX_BASH_TIMEOUT = 300
+MAX_GLOB_RESULTS = 200
+MAX_GREP_MATCHES = 100
+MAX_GREP_LINE_CHARS = 200
+MAX_GREP_FILE_BYTES = 2_000_000
+GREP_TIMEOUT = 30
 SKIP = {".git", ".venv", "__pycache__", "node_modules", ".DS_Store"}
 
 
@@ -179,6 +186,167 @@ def _bash(ws: Workspace, args: dict) -> str:
     return f"{status}\n{output}" if output else f"{status}\n(no output)"
 
 
+def _inside(ws: Workspace, path: Path) -> bool:
+    """A symlinked file can still point outside; check the resolved target."""
+    try:
+        return path.resolve().is_relative_to(ws.root)
+    except OSError:
+        return False
+
+
+def _glob(ws: Workspace, args: dict) -> str:
+    pattern = args.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        raise ToolError("pattern must be a non-empty string")
+    base = ws.resolve(args.get("path") or ".")
+    if not base.is_dir():
+        raise ToolError(f"not a directory: {args.get('path')!r}")
+
+    found: list[tuple[float, str]] = []
+    try:
+        candidates = base.glob(pattern)
+    except (NotImplementedError, ValueError) as e:
+        raise ToolError(f"bad glob pattern {pattern!r}: {e}") from None
+
+    for path in candidates:
+        if not path.is_file() or not _inside(ws, path):
+            continue
+        rel = ws.rel(path)
+        if any(part in SKIP for part in Path(rel).parts):
+            continue
+        try:
+            found.append((path.stat().st_mtime, rel))
+        except OSError:
+            continue
+
+    if not found:
+        return f"no files match {pattern!r}"
+
+    found.sort(reverse=True)  # newest first
+    shown = [rel for _, rel in found[:MAX_GLOB_RESULTS]]
+    out = "\n".join(shown)
+    if len(found) > MAX_GLOB_RESULTS:
+        out += f"\n-- {len(found) - MAX_GLOB_RESULTS} more; showing the {MAX_GLOB_RESULTS} newest"
+    return out
+
+
+def _grep_ripgrep(
+    rg: str, ws: Workspace, pattern: str, target: str, include: str | None, literal: bool
+):
+    cmd = [
+        rg,
+        "--line-number",
+        "--no-heading",
+        "--color=never",
+        "--no-ignore",  # parity with the Python fallback, which cannot read .gitignore
+        "--hidden",
+        "--max-columns",
+        str(MAX_GREP_LINE_CHARS),
+    ]
+    for name in sorted(SKIP):
+        cmd += ["-g", f"!{name}"]
+    if include:
+        cmd += ["-g", include]
+    if literal:
+        cmd.append("--fixed-strings")
+    cmd += ["-e", pattern, target]
+
+    try:
+        proc = subprocess.run(
+            cmd, cwd=ws.root, capture_output=True, text=True,
+            errors="replace", timeout=GREP_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise ToolError(f"grep timed out after {GREP_TIMEOUT}s") from None
+    if proc.returncode == 1:
+        return []
+    if proc.returncode != 0:
+        raise ToolError(f"ripgrep failed: {proc.stderr.strip()[:200]}")
+
+    hits = []
+    for line in proc.stdout.splitlines():
+        path, _, rest = line.partition(":")
+        number, _, text = rest.partition(":")
+        if not number.isdigit():
+            continue
+        hits.append((path.removeprefix("./"), int(number), text))
+    return hits
+
+
+def _grep_python(ws: Workspace, regex: re.Pattern, base: Path, include: str | None):
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in SKIP]
+        for name in sorted(filenames):
+            if name in SKIP or (include and not fnmatch.fnmatch(name, include)):
+                continue
+            path = Path(dirpath) / name
+            if not _inside(ws, path):
+                continue
+            try:
+                if path.stat().st_size > MAX_GREP_FILE_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue  # unreadable or binary
+            for number, line in enumerate(text.splitlines(), 1):
+                if regex.search(line):
+                    hits.append((ws.rel(path), number, line[:MAX_GREP_LINE_CHARS]))
+                    if len(hits) > MAX_GREP_MATCHES:
+                        return hits
+    return hits
+
+
+def _grep(ws: Workspace, args: dict) -> str:
+    pattern = args.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        raise ToolError("pattern must be a non-empty string")
+
+    literal = bool(args.get("literal"))
+    if literal:
+        # Any string is a valid fixed-string search, so there is nothing to reject.
+        regex = re.compile(re.escape(pattern))
+    else:
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            raise ToolError(
+                f"invalid regex {pattern!r}: {e}. "
+                "Pass literal=true to search for this text exactly."
+            ) from None
+
+    base = ws.resolve(args.get("path") or ".")
+    if not base.is_dir():
+        raise ToolError(f"not a directory: {args.get('path')!r}")
+    include = args.get("include") or None
+
+    rg = shutil.which("rg")
+    if rg:
+        target = "." if base == ws.root else ws.rel(base)
+        hits = _grep_ripgrep(rg, ws, pattern, target, include, literal)
+        backend = "ripgrep"
+    else:
+        hits = _grep_python(ws, regex, base, include)
+        backend = "python re"
+
+    if not hits:
+        hint = ""
+        if literal and "\\" in pattern:
+            hint = (
+                " — the pattern contains backslashes, which literal=true "
+                "searches for as real characters; retry with the raw text"
+            )
+        return f"no matches for {pattern!r} ({backend}){hint}"
+
+    capped = hits[:MAX_GREP_MATCHES]
+    files = len({rel for rel, _, _ in capped})
+    lines = [f"{rel}:{number}: {text.strip()}" for rel, number, text in capped]
+    summary = f"-- {len(capped)} matches in {files} files ({backend})"
+    if len(hits) > MAX_GREP_MATCHES:
+        summary += "; more exist, narrow the pattern"
+    return "\n".join(lines) + f"\n{summary}"
+
+
 def _match_lines(text: str, needle: str) -> list[int]:
     """1-based line number of every non-overlapping occurrence."""
     found, start = [], 0
@@ -328,6 +496,76 @@ def build_registry(ws: Workspace) -> dict[str, Tool]:
                 "additionalProperties": False,
             },
             run=lambda args: _list_files(ws, args),
+        ),
+        "glob": Tool(
+            name="glob",
+            description=(
+                "Find files by name pattern, newest first. Use '**/*.py' to "
+                "search every subdirectory. This is how you locate files in a "
+                "repo you have not seen — reach for it before read_file. "
+                "Results are ordered by modification time, so the most "
+                f"recently changed files come first. Returns at most "
+                f"{MAX_GLOB_RESULTS} paths."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern, e.g. '**/*.py' or 'src/*.ts'.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search from. Defaults to the workspace root.",
+                    },
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+            run=lambda args: _glob(ws, args),
+        ),
+        "grep": Tool(
+            name="grep",
+            description=(
+                "Search file contents with a regular expression and get back "
+                "'path:line: text' for every match. Use it to find where a "
+                "symbol is defined or used before reading whole files. Set "
+                "literal=true to search for text exactly, without regex "
+                "meaning — always do that for punctuation-heavy strings rather "
+                "than escaping by hand or falling back to bash. Keep regex "
+                "patterns portable: lookahead and backreferences are not "
+                "supported when ripgrep is installed. Narrow with 'include' "
+                f"(e.g. '*.py'). Returns at most {MAX_GREP_MATCHES} matches."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regular expression to search for.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search in. Defaults to the workspace root.",
+                    },
+                    "include": {
+                        "type": "string",
+                        "description": "Only search files matching this glob, e.g. '*.py'.",
+                    },
+                    "literal": {
+                        "type": "boolean",
+                        "description": (
+                            "Treat pattern as exact text, not a regex. Use for "
+                            "strings containing ( ) [ ] . * + ? etc. Pass the "
+                            "raw text unescaped — adding backslashes will "
+                            "search for the backslashes themselves."
+                        ),
+                    },
+                },
+                "required": ["pattern"],
+                "additionalProperties": False,
+            },
+            run=lambda args: _grep(ws, args),
         ),
         "read_file": Tool(
             name="read_file",
