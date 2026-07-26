@@ -3,9 +3,10 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 4** — a streaming REPL with conversation history, per-turn
+**Status: Stage 5** — a streaming REPL with conversation history, per-turn
 token accounting, a tool-use loop, and workspace-confined file tools
-(`list_files`, `read_file`, `write_file`, `get_current_time`).
+(`list_files`, `read_file`, `write_file`, `edit_file`, `get_current_time`).
+Successful edits print a unified diff to the terminal.
 
 Tools live in [`agent/tools.py`](agent/tools.py). Adding one is an entry in
 `build_registry`: a name, a description written for the model, a JSON Schema,

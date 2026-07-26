@@ -43,6 +43,8 @@ class ToolResult:
     call_id: str
     content: str
     is_error: bool = False
+    # Terminal-only. Never sent to the API — see append_results below.
+    display: str | None = None
 
 
 @dataclass(frozen=True)

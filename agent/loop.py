@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .providers import Emit, Message, Provider, ToolCall, ToolResult, Usage
-from .tools import Tool, ToolError
+from .tools import Tool, ToolError, ToolOutput
 
 MAX_ITERATIONS = 8
 
@@ -23,7 +23,10 @@ def _execute(call: ToolCall, registry: dict[str, Tool]) -> ToolResult:
         return ToolResult(call.id, f"error: no tool named {call.name!r}", is_error=True)
 
     try:
-        return ToolResult(call.id, tool.run(call.args))
+        out = tool.run(call.args)
+        if isinstance(out, ToolOutput):
+            return ToolResult(call.id, out.content, display=out.display)
+        return ToolResult(call.id, out)
     except ToolError as e:
         # Expected failure — the model reads this and adjusts.
         return ToolResult(call.id, f"error: {e}", is_error=True)

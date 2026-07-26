@@ -20,6 +20,33 @@ def _preview(text: str, width: int = 96) -> str:
     return f"{first} (+{extra} lines)" if rest else first
 
 
+def _fmt_args(args: dict, width: int = 44) -> str:
+    """Edit and write calls carry whole file bodies — never print them raw."""
+    bits = []
+    for key, value in args.items():
+        if not isinstance(value, str):
+            bits.append(f"{key}={value!r}")
+            continue
+        text = value.replace("\n", "\\n")
+        if len(text) > width:
+            text = text[:width] + "…"
+        bits.append(f"{key}={text!r}")
+    return ", ".join(bits)
+
+
+_DIFF_COLORS = {"+": "\033[32m", "-": "\033[31m", "@": "\033[36m"}
+
+
+def _colorize(diff: str) -> str:
+    if not sys.stderr.isatty():
+        return diff
+    out = []
+    for line in diff.splitlines():
+        color = None if line.startswith(("+++", "---")) else _DIFF_COLORS.get(line[:1])
+        out.append(f"{color}{line}\033[0m" if color else line)
+    return "\n".join(out)
+
+
 def _usage_line(usages: list[Usage], msgs: int) -> str:
     parts = [
         f"in {sum(u.input_tokens for u in usages)}",
@@ -92,9 +119,12 @@ def main() -> int:
         def on_tool(call: ToolCall, result: ToolResult) -> None:
             arrow = "!!" if result.is_error else "->"
             print(
-                f"\n[tool] {call.name}({call.args}) {arrow} {_preview(result.content)}",
+                f"\n[tool] {call.name}({_fmt_args(call.args)}) "
+                f"{arrow} {_preview(result.content)}",
                 file=sys.stderr,
             )
+            if result.display:
+                print(_colorize(result.display), file=sys.stderr)
 
         try:
             usages = loop.run_turn(provider, history, toolset, emit, on_tool)

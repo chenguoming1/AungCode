@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import difflib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 MAX_READ_LINES = 300
 MAX_LINE_CHARS = 500
 MAX_LIST_ENTRIES = 200
+MAX_DIFF_LINES = 80
 SKIP = {".git", ".venv", "__pycache__", "node_modules", ".DS_Store"}
 
 
@@ -17,11 +20,19 @@ class ToolError(Exception):
 
 
 @dataclass(frozen=True)
+class ToolOutput:
+    """Split what the model reads from what the terminal shows."""
+
+    content: str
+    display: str | None = None
+
+
+@dataclass(frozen=True)
 class Tool:
     name: str
     description: str
     schema: dict
-    run: Callable[[dict], str]
+    run: Callable[[dict], str | ToolOutput]
 
 
 @dataclass(frozen=True)
@@ -103,6 +114,90 @@ def _write_file(ws: Workspace, args: dict) -> str:
     return (
         f"{verb} {ws.rel(path)} "
         f"({len(content.splitlines())} lines, {len(content.encode())} bytes)"
+    )
+
+
+def _match_lines(text: str, needle: str) -> list[int]:
+    """1-based line number of every non-overlapping occurrence."""
+    found, start = [], 0
+    while (i := text.find(needle, start)) != -1:
+        found.append(text.count("\n", 0, i) + 1)
+        start = i + len(needle)
+    return found
+
+
+def _unified_diff(rel: str, before: str, after: str) -> str:
+    lines = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+            lineterm="",
+            n=2,
+        )
+    )
+    if len(lines) > MAX_DIFF_LINES:
+        omitted = len(lines) - MAX_DIFF_LINES
+        lines = lines[:MAX_DIFF_LINES] + [f"... {omitted} more diff lines"]
+    return "\n".join(lines)
+
+
+def _edit_file(ws: Workspace, args: dict) -> ToolOutput:
+    path = ws.resolve(args.get("path"))
+    old = args.get("old_str")
+    new = args.get("new_str", "")
+    if not isinstance(old, str) or not isinstance(new, str):
+        raise ToolError("old_str and new_str must be strings")
+    if not old:
+        raise ToolError("old_str must not be empty; use write_file to create a file")
+    if old == new:
+        raise ToolError("old_str and new_str are identical, nothing to do")
+    if not path.is_file():
+        raise ToolError(f"no such file: {args.get('path')!r}")
+
+    try:
+        before = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ToolError(f"{ws.rel(path)} is not UTF-8 text") from None
+
+    hits = _match_lines(before, old)
+    rel = ws.rel(path)
+
+    if not hits:
+        # The overwhelmingly common cause is indentation, so say so explicitly
+        # rather than making the model guess.
+        hint = ""
+        if re.match(r"\s*\d+\|", old):
+            hint = (
+                " old_str still contains read_file's '   12| ' line-number "
+                "prefixes — strip them and pass only the file text."
+            )
+        elif old.strip() and old.strip() in before:
+            hint = (
+                " The text exists but the surrounding whitespace or indentation "
+                "differs — copy it exactly from read_file output."
+            )
+        raise ToolError(f"old_str not found in {rel}.{hint}")
+
+    if len(hits) > 1:
+        where = ", ".join(str(n) for n in hits[:10])
+        more = f" (and {len(hits) - 10} more)" if len(hits) > 10 else ""
+        raise ToolError(
+            f"old_str matched {len(hits)} times in {rel}, at lines {where}{more}. "
+            "It must match exactly once — extend old_str with surrounding lines "
+            "to make it unique."
+        )
+
+    after = before.replace(old, new, 1)
+    path.write_text(after, encoding="utf-8")
+
+    removed = len(old.splitlines())
+    added = len(new.splitlines())
+    action = "deleted" if not new else "replaced"
+    return ToolOutput(
+        content=f"{action} 1 occurrence in {rel} at line {hits[0]} (-{removed} +{added} lines)",
+        display=_unified_diff(rel, before, after),
     )
 
 
@@ -223,5 +318,44 @@ def build_registry(ws: Workspace) -> dict[str, Tool]:
                 "additionalProperties": False,
             },
             run=lambda args: _write_file(ws, args),
+        ),
+        "edit_file": Tool(
+            name="edit_file",
+            description=(
+                "Replace one exact snippet of text in a file. Prefer this over "
+                "write_file for changes to existing files — it is far cheaper "
+                "than rewriting the whole file. old_str must appear exactly "
+                "once, so include enough surrounding lines to make it unique. "
+                "Copy old_str verbatim from read_file output but WITHOUT the "
+                "'   12| ' line-number prefix. "
+                "Everything old_str matches is DELETED and replaced by new_str: "
+                "if you widened old_str to disambiguate, repeat that context in "
+                "new_str or you will delete it too. Use an empty new_str only "
+                "when you mean to remove the entire matched text."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File relative to the workspace root.",
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "Exact text to find, including indentation.",
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": (
+                            "Text that replaces the whole of old_str. Must repeat "
+                            "any context lines you added to old_str. Empty string "
+                            "deletes everything old_str matched."
+                        ),
+                    },
+                },
+                "required": ["path", "old_str", "new_str"],
+                "additionalProperties": False,
+            },
+            run=lambda args: _edit_file(ws, args),
         ),
     }
