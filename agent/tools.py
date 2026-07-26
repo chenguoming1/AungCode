@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import difflib
+import os
 import re
+import signal
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +15,10 @@ MAX_READ_LINES = 300
 MAX_LINE_CHARS = 500
 MAX_LIST_ENTRIES = 200
 MAX_DIFF_LINES = 80
+MAX_BASH_LINES = 200
+MAX_BASH_CHARS = 12000
+BASH_TIMEOUT = 60
+MAX_BASH_TIMEOUT = 300
 SKIP = {".git", ".venv", "__pycache__", "node_modules", ".DS_Store"}
 
 
@@ -115,6 +122,59 @@ def _write_file(ws: Workspace, args: dict) -> str:
         f"{verb} {ws.rel(path)} "
         f"({len(content.splitlines())} lines, {len(content.encode())} bytes)"
     )
+
+
+def _truncate_middle(text: str) -> str:
+    """Keep the head and the tail — a long run's summary is at the end."""
+    lines = text.splitlines()
+    if len(lines) > MAX_BASH_LINES:
+        half = MAX_BASH_LINES // 2
+        omitted = len(lines) - 2 * half
+        lines = lines[:half] + [f"... [{omitted} lines omitted] ..."] + lines[-half:]
+        text = "\n".join(lines)
+    if len(text) > MAX_BASH_CHARS:
+        half = MAX_BASH_CHARS // 2
+        omitted = len(text) - 2 * half
+        text = f"{text[:half]}\n... [{omitted} chars omitted] ...\n{text[-half:]}"
+    return text
+
+
+def _bash(ws: Workspace, args: dict) -> str:
+    command = args.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ToolError("command must be a non-empty string")
+
+    requested = args.get("timeout")
+    try:
+        timeout = min(
+            BASH_TIMEOUT if requested is None else int(requested), MAX_BASH_TIMEOUT
+        )
+    except (TypeError, ValueError):
+        raise ToolError("timeout must be an integer number of seconds") from None
+    if timeout < 1:
+        raise ToolError("timeout must be at least 1 second")
+
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=ws.root,
+        stdin=subprocess.DEVNULL,  # a command that prompts fails instead of hanging
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # interleaved in the order they were written
+        text=True,
+        errors="replace",
+        start_new_session=True,  # own process group, so the kill below is total
+    )
+    try:
+        output, _ = proc.communicate(timeout=timeout)
+        status = f"exit code: {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        output, _ = proc.communicate()
+        status = f"timed out after {timeout}s and was killed; partial output follows"
+
+    output = _truncate_middle(output.rstrip())
+    return f"{status}\n{output}" if output else f"{status}\n(no output)"
 
 
 def _match_lines(text: str, needle: str) -> list[int]:
@@ -357,5 +417,40 @@ def build_registry(ws: Workspace) -> dict[str, Tool]:
                 "additionalProperties": False,
             },
             run=lambda args: _edit_file(ws, args),
+        ),
+        "bash": Tool(
+            name="bash",
+            description=(
+                "Run a shell command and get back its combined stdout/stderr "
+                "and exit code. Use it for running tests, git, build tools, "
+                "package managers, and anything the other tools cannot do. "
+                "Prefer read_file, edit_file and list_files for reading and "
+                "changing files — they are cheaper and give better errors. "
+                "Every call starts a fresh shell in the workspace root and "
+                "NOTHING persists between calls: no cd, no variables, no "
+                "background jobs. Chain within one call instead, e.g. "
+                "'cd src && pytest -q'. stdin is empty, so a command that "
+                "waits for input fails instead of hanging. Long output is "
+                "truncated in the middle, keeping the start and the end."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to run.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            f"Seconds before the command is killed. "
+                            f"Defaults to {BASH_TIMEOUT}, maximum {MAX_BASH_TIMEOUT}."
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            run=lambda args: _bash(ws, args),
         ),
     }

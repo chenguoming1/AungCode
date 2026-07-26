@@ -3,9 +3,9 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 5** — a streaming REPL with conversation history, per-turn
-token accounting, a tool-use loop, and workspace-confined file tools
-(`list_files`, `read_file`, `write_file`, `edit_file`, `get_current_time`).
+**Status: Stage 6** — a streaming REPL with conversation history, per-turn
+token accounting, a tool-use loop, file tools (`list_files`, `read_file`,
+`write_file`, `edit_file`), a `bash` tool, and `get_current_time`.
 Successful edits print a unified diff to the terminal.
 
 Tools live in [`agent/tools.py`](agent/tools.py). Adding one is an entry in
@@ -28,6 +28,16 @@ containment, so neither can escape.
 > **The agent can read every file under that root**, including `.env` and any
 > credentials, and send the contents to your provider. Point it at a project
 > directory, not your home directory.
+
+> **`bash` is not confined by the workspace.** It starts in the root, but
+> `cd /` and `cat ~/.ssh/id_rsa` work, as does anything else your user account
+> can do — deleting files, network access, installing packages. There is no
+> sandbox and no confirmation prompt. Run this against code you can afford to
+> lose, ideally in a container or VM.
+
+Each `bash` call is a fresh shell in the workspace root. Nothing persists
+between calls — no `cd`, no variables, no background jobs. Chain within one
+call instead: `cd src && pytest -q`.
 
 ## Setup
 
