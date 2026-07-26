@@ -1,0 +1,165 @@
+# Manual test notes
+
+Verification steps for each stage, in the order they were built. Every check
+is something you run and eyeball — there is no test runner yet.
+
+## Before you start
+
+```bash
+cd /Users/aungbonaing/develop/personal/Apps/AungCode
+# .env must hold a key for the provider named in agent/config.toml
+.venv/bin/python -m agent
+```
+
+Three things that will otherwise confuse you:
+
+- **Since Stage 7, `write_file` / `edit_file` / `bash` prompt for approval.**
+  Older stage checks assume they just run. Answer `y`, or prefix the command
+  with `AGENT_APPROVE_ALL=1` when replaying a scripted test.
+- **Free-tier providers rate-limit.** `[RateLimitError] Too many requests`
+  means wait, not broken. The session survives it; the turn rolls back.
+- **Always test file/bash behaviour in a sandbox**, never in this repo.
+  `AGENT_WORKSPACE=/tmp/...` is how you point it somewhere disposable.
+
+## Fixtures
+
+```bash
+# Stage 4-6 sandbox
+mkdir -p /tmp/sandbox && cd /tmp/sandbox
+printf 'a\nb\nc\n' > notes.txt
+seq 1 1000 > big.txt
+
+# Stage 5: duplicate lines, to force an ambiguous match
+mkdir -p /tmp/edit5 && printf 'def f():\n    x = 1\n    return x\n\ndef g():\n    x = 1\n    return x\n' > /tmp/edit5/dup.py
+
+# Stage 6: a project with one planted bug (add returns a - b)
+mkdir -p /tmp/proj6 && cd /tmp/proj6
+cat > calc.py <<'EOF'
+def add(a, b):
+    return a - b
+
+def mul(a, b):
+    return a * b
+EOF
+cat > test_calc.py <<'EOF'
+import unittest
+from calc import add, mul
+
+class T(unittest.TestCase):
+    def test_add(self):
+        self.assertEqual(add(2, 3), 5)
+    def test_mul(self):
+        self.assertEqual(mul(2, 3), 6)
+
+if __name__ == "__main__":
+    unittest.main()
+EOF
+
+# Stage 7 sandbox
+mkdir -p /tmp/appr7 && printf 'keep me\n' > /tmp/appr7/data.txt
+```
+
+---
+
+## Stage 1 — streaming REPL
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `write a haiku about tail latency` | Text arrives incrementally, not all at once |
+| 2 | `my name is Chen`, then `what is my name?` | It does **not** know — turns are independent by design |
+| 3 | Ctrl-C mid-stream | `[cancelled]`, prompt returns, process alive |
+| 4 | Ctrl-D on an empty prompt | Exits 0 |
+| 5 | `AGENT_PROVIDER=github .venv/bin/python -m agent` | Banner shows the overridden provider |
+| 6 | `echo "say hi" \| .venv/bin/python -m agent > out.txt` | `out.txt` holds only the reply; banner went to stderr |
+
+## Stage 2 — history + token usage
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `my name is Chen`, then `what is my name?` | Now it answers correctly |
+| 2 | Watch the usage line each turn | `in N` climbs, `out N` stays small — the whole history is re-sent |
+| 3 | `/clear`, then `what is my name?` | No memory; `in` drops; `2 msgs in context` |
+| 4 | `count slowly to 200`, Ctrl-C, then ask what you just requested | `[cancelled — turn discarded]`; it has no idea; msg count unchanged |
+| 5 | Run with a bad key and send a message | `[AuthenticationError]`, prompt returns, history rolled back |
+
+## Stage 3 — tool loop
+
+Config check: banner reads `... · N tools`.
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `what time is it in Tokyo?` | A `[tool]` line, then prose, and `2 api calls` in the usage line |
+| 2 | `what is 2+2?` | No `[tool]` line, no api-call count (a single call isn't shown) |
+| 3 | Follow up with `and in UTC?` | Tool fires again; `msgs in context` jumps by 4, not 2 |
+| 4 | `what time is it in Mars/Olympus?` | `[tool] ... !!` with an error, and the model recovers |
+
+## Stage 4 — workspace file tools
+
+```bash
+AGENT_WORKSPACE=/tmp/sandbox .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `what files are here?` | `list_files` call |
+| 2 | `read notes.txt` | Tool output is line-numbered (`1\| a`). The model's prose reply strips the numbers — that is normal |
+| 3 | `create hello.py that prints hello, then read it back` | Two tool calls; `cat /tmp/sandbox/hello.py` confirms |
+| 4 | `read ../../etc/passwd` | `!! error: path '../../etc/passwd' escapes the workspace root`. If you get a polite refusal with **no** `[tool]` line, the model declined on its own — ask more directly so the guard is actually exercised |
+| 5 | `read big.txt` | Stops at line 300 with `... truncated at line 300 of 1000; call again with offset=301` |
+| 6 | `show me the last 10 lines` | It calls `read_file` with a computed `offset` |
+
+## Stage 5 — edit_file
+
+```bash
+AGENT_WORKSPACE=/tmp/edit5 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `in dup.py rename f to first` | `[tool] edit_file`, then a coloured unified diff |
+| 2 | `change x = 1 to x = 2 in g only` | May first get `matched 2 times ... at lines 2, 6`, then retry with more context in the same turn. Multiple `[tool]` lines *is* the recovery |
+| 3 | `in dup.py, delete the "return x" line from the first() function only` | Diff shows a single `-    return x`; `python3 -c "import ast; ast.parse(open('/tmp/edit5/dup.py').read())"` still parses |
+| 4 | Compare token cost against `rewrite dup.py with both functions renamed` | Edit sends a snippet, write sends the whole file |
+| 5 | `edit ../../etc/hosts` | Escapes the workspace root |
+
+Known hazard: if the model widens `old_str` to disambiguate and passes an
+empty `new_str`, it deletes the context too. The tool description warns it;
+that is mitigation, not enforcement.
+
+## Stage 6 — bash
+
+```bash
+AGENT_WORKSPACE=/tmp/proj6 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `run: echo hello; echo oops >&2; exit 7` | `exit code: 7`, both streams interleaved |
+| 2 | `run pwd`, `run cd /usr && pwd`, `run pwd` | Third is back at the workspace root — no state persists between calls |
+| 3 | `run sleep 120 with a 3 second timeout` | Returns in ~3s, `timed out after 3s and was killed`. `pgrep -f "sleep 120"` finds nothing |
+| 4 | `run seq 1 5000` | `... [4800 lines omitted] ...` between line 1 and line 5000 |
+| 5 | `run the tests with python3 -m unittest, then fix what's broken and re-run` | bash (exit 1) → read → read → edit → bash (exit 0). Verify: `cd /tmp/proj6 && python3 -m unittest` |
+
+## Stage 7 — approval
+
+```bash
+AGENT_WORKSPACE=/tmp/appr7 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `delete data.txt using bash`, answer `n` | `$ rm data.txt` shown first; file survives; model explains instead of retrying |
+| 2 | `create hello.txt saying hi`, answer `y` | Action shows `write hello.txt` with `+ hi`; file appears |
+| 3 | `overwrite data.txt with the word replaced`, answer `n` | Header reads `[OVERWRITES existing file, 1 lines]` **before** anything is written |
+| 4 | `run echo one` answer `a`, then `run echo two` | Second prints `[approved: always]` and does not prompt |
+| 5 | Then `create a file called x.txt` | `write_file` still prompts — "always" is per-tool |
+| 6 | `what files are here and what's in data.txt?` | Zero prompts; read-only tools auto-approve |
+| 7 | Ctrl-C at an approval prompt | Whole turn cancelled and rolled back |
+
+---
+
+## Cleanup
+
+```bash
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7
+```

@@ -8,19 +8,29 @@ from .tools import Tool, ToolError, ToolOutput
 MAX_ITERATIONS = 8
 
 OnTool = Callable[[ToolCall, ToolResult], None]
+# Returns True to let the call proceed. Asked once per call, before execution.
+Approve = Callable[[ToolCall], bool]
 
 
 class MaxIterations(RuntimeError):
     """The model kept calling tools past the allowed number of round trips."""
 
 
-def _execute(call: ToolCall, registry: dict[str, Tool]) -> ToolResult:
+def _execute(call: ToolCall, registry: dict[str, Tool], approve: Approve) -> ToolResult:
     if call.error:
         return ToolResult(call.id, call.error, is_error=True)
 
     tool = registry.get(call.name)
     if tool is None:
         return ToolResult(call.id, f"error: no tool named {call.name!r}", is_error=True)
+
+    if tool.requires_approval and not approve(call):
+        return ToolResult(
+            call.id,
+            "the user denied this action. Do not retry it; explain what you "
+            "wanted to do, or propose a different approach.",
+            is_error=True,
+        )
 
     try:
         out = tool.run(call.args)
@@ -42,6 +52,7 @@ def run_turn(
     tools: list[Tool],
     emit: Emit,
     on_tool: OnTool,
+    approve: Approve,
     max_iterations: int = MAX_ITERATIONS,
 ) -> list[Usage]:
     """Drive one user turn to completion. Returns usage for each API call made."""
@@ -58,7 +69,7 @@ def run_turn(
 
         results = []
         for call in step.tool_calls:
-            result = _execute(call, registry)
+            result = _execute(call, registry, approve)
             on_tool(call, result)
             results.append(result)
         provider.append_results(messages, results)

@@ -8,7 +8,77 @@ from pathlib import Path
 from . import loop
 from .config import ConfigError, load
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
-from .tools import Workspace, build_registry
+from .tools import ToolError, Workspace, build_registry
+
+APPROVE_ALL = os.environ.get("AGENT_APPROVE_ALL") == "1"
+
+
+def _block(prefix: str, text: str, limit: int = 20) -> str:
+    if not text:
+        return f"  {prefix} (empty)"
+    lines = text.splitlines()
+    out = [f"  {prefix} {line}" for line in lines[:limit]]
+    if len(lines) > limit:
+        out.append(f"  {prefix} ... +{len(lines) - limit} more lines")
+    return "\n".join(out)
+
+
+def _render_action(call: ToolCall, workspace: Workspace) -> str:
+    """The exact thing about to happen — never abbreviated."""
+    args = call.args
+    if call.name == "bash":
+        return f"  $ {args.get('command', '')}"
+
+    if call.name == "write_file":
+        path = args.get("path", "?")
+        content = args.get("content", "")
+        note = ""
+        try:
+            target = workspace.resolve(path)
+            if target.is_file():
+                existing = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+                note = f"  [OVERWRITES existing file, {existing} lines]"
+        except (ToolError, OSError):
+            pass
+        return f"  write {path}{note}\n{_block('+', content)}"
+
+    if call.name == "edit_file":
+        return (
+            f"  edit {args.get('path', '?')}\n"
+            f"{_block('-', args.get('old_str', ''))}\n"
+            f"{_block('+', args.get('new_str', ''))}"
+        )
+
+    return f"  {call.name}({_fmt_args(call.args)})"
+
+
+def _approver(workspace: Workspace, always: set[str]):
+    def approve(call: ToolCall) -> bool:
+        action = _render_action(call, workspace)
+        if APPROVE_ALL:
+            print(f"\n[auto-approved]\n{action}", file=sys.stderr)
+            return True
+        if call.name in always:
+            print(f"\n[approved: always]\n{action}", file=sys.stderr)
+            return True
+
+        print(f"\n{action}", file=sys.stderr)
+        while True:
+            print(f"approve {call.name}? [y/N/a=always] ", end="", file=sys.stderr, flush=True)
+            try:
+                reply = input().strip().lower()
+            except EOFError:
+                print("(no input — denied)", file=sys.stderr)
+                return False
+            if reply in ("y", "yes"):
+                return True
+            if reply in ("a", "always"):
+                always.add(call.name)
+                return True
+            if reply in ("", "n", "no"):
+                return False
+
+    return approve
 
 
 def _preview(text: str, width: int = 96) -> str:
@@ -85,8 +155,13 @@ def main() -> int:
         file=sys.stderr,
     )
     print(f"workspace: {workspace.root}", file=sys.stderr)
+    if APPROVE_ALL:
+        print("AGENT_APPROVE_ALL=1 — every action runs unattended", file=sys.stderr)
 
     history: list[Message] = []
+    # "always" decisions last for this process only, never written to disk.
+    always: set[str] = set()
+    approve = _approver(workspace, always)
 
     while True:
         try:
@@ -127,7 +202,7 @@ def main() -> int:
                 print(_colorize(result.display), file=sys.stderr)
 
         try:
-            usages = loop.run_turn(provider, history, toolset, emit, on_tool)
+            usages = loop.run_turn(provider, history, toolset, emit, on_tool, approve)
         except KeyboardInterrupt:
             del history[mark:]
             print("\n[cancelled — turn discarded]", file=sys.stderr)

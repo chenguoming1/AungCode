@@ -3,14 +3,37 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 6** — a streaming REPL with conversation history, per-turn
+**Status: Stage 7** — a streaming REPL with conversation history, per-turn
 token accounting, a tool-use loop, file tools (`list_files`, `read_file`,
-`write_file`, `edit_file`), a `bash` tool, and `get_current_time`.
+`write_file`, `edit_file`), a `bash` tool, `get_current_time`, and an
+approval prompt before anything that mutates the machine.
 Successful edits print a unified diff to the terminal.
+
+## Approval
+
+`write_file`, `edit_file`, and `bash` show the exact action and wait:
+
+```
+  $ rm -rf build
+approve bash? [y/N/a=always]
+```
+
+`y` runs it once, `n` declines (the model is told, and asked not to retry),
+`a` stops asking for that tool for the rest of the session. Anything else
+re-prompts; a bare Enter declines. "Always" decisions are per-tool, held in
+memory, and gone when the process exits. Read-only tools never prompt.
+
+Approved-by-always actions are still printed before they run, so you can see
+what happened even once you have stopped being asked.
+
+Set `AGENT_APPROVE_ALL=1` to skip every prompt — needed for piped or scripted
+runs, and dangerous everywhere else.
 
 Tools live in [`agent/tools.py`](agent/tools.py). Adding one is an entry in
 `build_registry`: a name, a description written for the model, a JSON Schema,
 and a callable. Nothing else in the codebase needs to change.
+
+Manual verification steps for every stage are in [NOTES.md](NOTES.md).
 
 ## Workspace
 

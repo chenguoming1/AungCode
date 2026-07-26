@@ -40,6 +40,8 @@ class Tool:
     description: str
     schema: dict
     run: Callable[[dict], str | ToolOutput]
+    # Anything that mutates the machine asks the user first.
+    requires_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -378,6 +380,7 @@ def build_registry(ws: Workspace) -> dict[str, Tool]:
                 "additionalProperties": False,
             },
             run=lambda args: _write_file(ws, args),
+            requires_approval=True,
         ),
         "edit_file": Tool(
             name="edit_file",
@@ -417,6 +420,7 @@ def build_registry(ws: Workspace) -> dict[str, Tool]:
                 "additionalProperties": False,
             },
             run=lambda args: _edit_file(ws, args),
+            requires_approval=True,
         ),
         "bash": Tool(
             name="bash",
@@ -452,5 +456,6 @@ def build_registry(ws: Workspace) -> dict[str, Tool]:
                 "additionalProperties": False,
             },
             run=lambda args: _bash(ws, args),
+            requires_approval=True,
         ),
     }

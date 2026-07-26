@@ -17,7 +17,7 @@ token_param = "max_completion_tokens"
 
 [providers.deepseek]
 kind = "openai"
-model = "deepseek-chat"
+model = "deepseek-v4-flash"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 max_tokens = 8192
