@@ -445,10 +445,61 @@ print("includes mcp  :", any(n.startswith("mcp__") for n in ro))   # must be Fal
 PY
 ```
 
+## Stage 15 — commands, hooks, cost
+
+```bash
+mkdir -p /tmp/s15/commands && cd /tmp/s15
+printf -- '---\ndescription: Review a file for problems\n---\nRead $ARGUMENTS and list any bugs you find. Be brief.\n' > commands/review.md
+printf 'Say hello and nothing else.\n' > commands/hello.md
+printf 'def f():\n    return 1/0\n' > buggy.py
+cat > .hooks.json <<'CFG'
+{
+  "pre": [
+    {"match": "write_file|edit_file", "command": "echo \"[pre] $AGENT_TOOL\" >> /tmp/s15/hook.log"},
+    {"match": "bash", "command": "echo 'policy: bash is not permitted here' >&2; exit 1"}
+  ],
+  "post": [
+    {"match": ".", "command": "echo \"[post] $AGENT_TOOL err=$AGENT_TOOL_ERROR\" >> /tmp/s15/hook.log"}
+  ]
+}
+CFG
+cd /Users/aungbonaing/develop/personal/Apps/AungCode
+AGENT_WORKSPACE=/tmp/s15 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | Read the startup lines | `hooks: 2 pre, 1 post` and `commands: /hello, /review` |
+| 2 | `/review buggy.py` | `/review ← review.md`, then it reads `buggy.py` and reports the division by zero — `$ARGUMENTS` was substituted |
+| 3 | `/hello extra words` | No `$ARGUMENTS` in that file, so the arguments are appended to the body |
+| 4 | `/nope` | `unknown command /nope — have /hello, /review`; nothing is sent to the model |
+| 5 | `/clear` | Still the built-in — a `commands/clear.md` could not shadow it |
+| 6 | `run: echo hi` and approve it | `✗ blocked by a pre-tool hook (exit 1): policy: bash is not permitted here`. The command never ran |
+| 7 | `cat /tmp/s15/hook.log` | `[post] read_file err=0` lines — the post hook saw each tool |
+| 8 | Ask anything | Usage line ends with `$0.0015 · total $0.0015` **only if the active profile has prices**; DeepSeek ships at 0, so fill them in or use the `anthropic` profile |
+| 9 | `/exit`, relaunch with `--continue` | `total` picks up where it left off |
+
+Cost maths and hook blocking, no API key needed:
+
+```bash
+.venv/bin/python - <<'PY'
+import types
+from agent.cli import turn_cost, _fmt_cost
+from agent.providers import Usage
+priced = types.SimpleNamespace(priced=True, price_in=5.0, price_out=25.0,
+                               price_cache_read=0.5, price_cache_write=6.25)
+free = types.SimpleNamespace(priced=False, price_in=0, price_out=0,
+                             price_cache_read=0, price_cache_write=0)
+u = [Usage(input_tokens=10_000, output_tokens=2_000, cache_read=40_000, cache_write=8_000)]
+print("priced  :", _fmt_cost(turn_cost(u, priced)), "(expect $0.1700)")
+print("unpriced:", turn_cost(u, free), "(expect 0.0 — nothing shown)")
+PY
+```
+
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12* /tmp/sub13 /tmp/mcp14
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12* /tmp/sub13 /tmp/mcp14 /tmp/s15
 ```

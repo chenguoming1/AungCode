@@ -3,11 +3,74 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 14** — a streaming REPL with a system prompt, conversation
+**Status: Stage 15** — a streaming REPL with a system prompt, conversation
 history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
 `grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
 `bash` tool, `get_current_time`, and an approval prompt before anything that
 mutates the machine. Successful edits print a unified diff to the terminal.
+
+## Slash commands
+
+Markdown files in `commands/` at the workspace root (override with
+`AGENT_COMMANDS_DIR`) become `/name`. A command is a prompt template — nothing
+below `cli.py` knows they exist.
+
+```markdown
+---
+description: Review a file for problems
+---
+Read $ARGUMENTS and list any bugs you find. Be brief.
+```
+
+`/review buggy.py` sends the body with `$ARGUMENTS` replaced. Without that
+token, arguments are appended. Built-in commands take precedence, and an
+unknown `/name` lists what is available instead of being sent to the model.
+
+## Hooks
+
+Shell commands fired around tool execution, configured in `.hooks.json` at the
+workspace root (override with `AGENT_HOOKS_CONFIG`):
+
+```json
+{
+  "pre":  [{"match": "bash", "command": "echo 'not permitted here' >&2; exit 1"}],
+  "post": [{"match": ".", "command": "echo \"$AGENT_TOOL\" >> /tmp/audit.log"}]
+}
+```
+
+`match` is a regex on the tool name, defaulting to everything. Hooks receive
+`AGENT_TOOL` and `AGENT_TOOL_ARGS`; post hooks also get `AGENT_TOOL_RESULT` and
+`AGENT_TOOL_ERROR`.
+
+**A pre hook exiting non-zero blocks the tool**, and its output becomes the
+error the model sees — so it can explain or try another way. A post hook runs
+after the fact, so a failure there is reported, not fatal.
+
+Hooks fire *after* approval, so a hook's side effects never run for a call you
+were about to refuse. Subagents run with no hooks: their tools are read-only,
+and a nested loop should not trigger a hook storm.
+
+## Cost
+
+Per-profile prices in [`agent/config.toml`](agent/config.toml), in USD per
+million tokens:
+
+```toml
+price_in = 5.00
+price_out = 25.00
+price_cache_read = 0.50
+price_cache_write = 6.25
+```
+
+The usage line then ends with the turn's cost and the session total:
+
+```
+in 4943 · out 149 · cached 2944 · … · session 5.1k · $0.0015 · total $0.0015
+```
+
+Cost is **derived from config, not reported by the API** — a profile with no
+prices shows none rather than a wrong number. The total is stored in the
+session file, so a resumed session keeps counting.
 
 ## MCP servers
 

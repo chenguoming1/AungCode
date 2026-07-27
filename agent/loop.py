@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .providers import RETRYABLE, Emit, Message, Provider, ToolCall, ToolResult, Usage
+from .hooks import NoHooks
 from .tools import Tool, ToolError, ToolOutput
 
 log = logging.getLogger(__name__)
@@ -28,7 +29,9 @@ class TurnResult:
     stop_reason: str = "end_turn"
 
 
-def _execute(call: ToolCall, registry: dict[str, Tool], approve: Approve) -> ToolResult:
+def _execute(
+    call: ToolCall, registry: dict[str, Tool], approve: Approve, hooks
+) -> ToolResult:
     if call.error:
         return ToolResult(call.id, call.error, is_error=True)
 
@@ -44,11 +47,21 @@ def _execute(call: ToolCall, registry: dict[str, Tool], approve: Approve) -> Too
             is_error=True,
         )
 
+    # After approval, so a hook's side effects never fire for a call the user
+    # was about to refuse.
+    blocked = hooks.before(call)
+    if blocked:
+        return ToolResult(call.id, blocked, is_error=True)
+
     try:
         out = tool.run(call.args)
-        if isinstance(out, ToolOutput):
-            return ToolResult(call.id, out.content, display=out.display)
-        return ToolResult(call.id, out)
+        result = (
+            ToolResult(call.id, out.content, display=out.display)
+            if isinstance(out, ToolOutput)
+            else ToolResult(call.id, out)
+        )
+        hooks.after(call, result)
+        return result
     except ToolError as e:
         # Expected failure — the model reads this and adjusts.
         return ToolResult(call.id, f"error: {e}", is_error=True)
@@ -93,10 +106,12 @@ def run_turn(
     on_tool: OnTool,
     approve: Approve,
     system: str,
+    hooks=None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive one user turn to completion. Returns usage for each API call made."""
     registry = {t.name: t for t in tools}
+    hooks = hooks or NoHooks()
     usages: list[Usage] = []
 
     for _ in range(max_iterations):
@@ -109,7 +124,7 @@ def run_turn(
 
         results = []
         for call in step.tool_calls:
-            result = _execute(call, registry, approve)
+            result = _execute(call, registry, approve, hooks)
             on_tool(call, result)
             results.append(result)
         provider.append_results(messages, results)

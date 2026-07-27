@@ -17,6 +17,12 @@ api_key_env = "ANTHROPIC_API_KEY"
 # Model ceiling: 128000 output, 1M context.
 max_tokens = 64000
 context_window = 1000000
+# USD per million tokens. Leave all four at 0 (or omit) when pricing is
+# unknown or free — the usage line then shows no cost rather than a wrong one.
+price_in = 5.00
+price_out = 25.00
+price_cache_read = 0.50
+price_cache_write = 6.25
 
 [providers.openai]
 kind = "openai"
@@ -37,6 +43,11 @@ base_url = "https://api.deepseek.com"
 # Model ceiling: 384000 output, 1M context (api-docs.deepseek.com pricing).
 max_tokens = 32768
 context_window = 1000000
+# USD per 1M tokens, from api-docs.deepseek.com/quick_start/pricing
+# (cache miss / output / cache hit).
+price_in = 0.14
+price_out = 0.28
+price_cache_read = 0.0028
 
 # GitHub Models. Needs a PAT with the `models:read` scope.
 # Model ids are publisher/model — see https://models.github.ai/catalog/models

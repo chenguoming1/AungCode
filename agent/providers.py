@@ -259,10 +259,15 @@ class OpenAIProvider:
         usage = None
         if raw is not None:
             details = getattr(raw, "prompt_tokens_details", None)
+            cached = getattr(details, "cached_tokens", 0) or 0
             usage = Usage(
-                input_tokens=raw.prompt_tokens,
+                # OpenAI's prompt_tokens includes the cached part; Anthropic's
+                # input_tokens excludes it. Normalise to Anthropic's meaning so
+                # "input" is always the uncached remainder — otherwise cached
+                # tokens get counted twice in both cost and context size.
+                input_tokens=max(raw.prompt_tokens - cached, 0),
                 output_tokens=raw.completion_tokens,
-                cache_read=getattr(details, "cached_tokens", 0) or 0,
+                cache_read=cached,
             )
 
         return Step(

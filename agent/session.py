@@ -105,6 +105,7 @@ def new(cfg, workspace_root: Path) -> Session:
         "model": cfg.model,
         "workspace": str(workspace_root),
         "session_tokens": 0,
+        "session_cost": 0.0,
         "messages": 0,
         "title": "",
     }
@@ -119,10 +120,16 @@ def _title(messages: list[Message]) -> str:
     return ""
 
 
-def save(session: Session, messages: list[Message], session_tokens: int) -> None:
+def save(
+    session: Session,
+    messages: list[Message],
+    session_tokens: int,
+    session_cost: float = 0.0,
+) -> None:
     session.meta.update(
         updated_at=time.time(),
         session_tokens=session_tokens,
+        session_cost=round(session_cost, 6),
         messages=len(messages),
         title=session.meta.get("title") or _title(messages),
     )

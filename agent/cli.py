@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import compact, loop, mcp, session, subagent
+from . import commands, compact, hooks as hooks_mod, loop, mcp, session, subagent
 from .config import ConfigError, load
 from .prompt import AGENT_FILE, build_system
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
@@ -151,18 +151,48 @@ def _adopt(r: Renderer, cfg, workspace: Workspace, found: session.Session):
         f"resumed {sess.id} — {len(messages)} msgs, "
         f"{_fmt_tokens(int(sess.meta.get('session_tokens', 0)))} tokens previously"
     )
-    return sess, messages, int(sess.meta.get("session_tokens", 0))
+    return (
+        sess,
+        messages,
+        int(sess.meta.get("session_tokens", 0)),
+        float(sess.meta.get("session_cost", 0.0)),
+    )
 
 
-def _persist(r: Renderer, sess: session.Session, history: list[Message], tokens: int) -> None:
+def _persist(
+    r: Renderer, sess: session.Session, history: list[Message], tokens: int, cost: float = 0.0
+) -> None:
     try:
-        session.save(sess, history, tokens)
+        session.save(sess, history, tokens, cost)
     except OSError as e:
         r.warn(f"could not save session: {e}")
 
 
 def _fmt_tokens(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _fmt_cost(amount: float) -> str:
+    # Cheap models produce sub-cent turns; four decimals would render them all
+    # as $0.0000, which reads as "free" rather than "small".
+    if amount < 0.01:
+        return f"${amount:.6f}"
+    return f"${amount:.4f}" if amount < 1 else f"${amount:.2f}"
+
+
+def turn_cost(usages: list[Usage], cfg) -> float:
+    """Derived from configured prices — zero when the profile has none."""
+    if not cfg.priced:
+        return 0.0
+    total = 0.0
+    for u in usages:
+        total += (
+            u.input_tokens * cfg.price_in
+            + u.output_tokens * cfg.price_out
+            + u.cache_read * cfg.price_cache_read
+            + u.cache_write * cfg.price_cache_write
+        )
+    return total / 1_000_000
 
 
 def context_size(usages: list[Usage]) -> int:
@@ -173,7 +203,15 @@ def context_size(usages: list[Usage]) -> int:
     return last.input_tokens + last.cache_read + last.cache_write + last.output_tokens
 
 
-def _usage_line(usages: list[Usage], msgs: int, ctx: int, window: int, session: int) -> str:
+def _usage_line(
+    usages: list[Usage],
+    msgs: int,
+    ctx: int,
+    window: int,
+    session: int,
+    cost: float,
+    session_cost: float,
+) -> str:
     parts = [
         f"in {sum(u.input_tokens for u in usages)}",
         f"out {sum(u.output_tokens for u in usages)}",
@@ -190,6 +228,8 @@ def _usage_line(usages: list[Usage], msgs: int, ctx: int, window: int, session: 
     if ctx:
         parts.append(f"ctx {_fmt_tokens(ctx)}/{_fmt_tokens(window)} ({ctx * 100 // window}%)")
     parts.append(f"session {_fmt_tokens(session)}")
+    if session_cost:
+        parts.append(f"{_fmt_cost(cost)} · total {_fmt_cost(session_cost)}")
     return " · ".join(parts)
 
 
@@ -248,6 +288,14 @@ def main(argv: list[str] | None = None) -> int:
             + ", ".join(f"{s.name} ({s.info.get('name', '?')})" for s in servers)
         )
 
+    hooks = hooks_mod.load(workspace.root, r.warn)
+    if isinstance(hooks, hooks_mod.Hooks):
+        r.note(f"hooks: {len(hooks.pre)} pre, {len(hooks.post)} post")
+
+    user_commands = commands.load(workspace.root)
+    if user_commands:
+        r.note("commands: " + ", ".join("/" + n for n in sorted(user_commands)))
+
     budget = subagent.Budget()
 
     def on_sub_tool(call: ToolCall, result: ToolResult) -> None:
@@ -273,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
 
     history: list[Message] = []
     session_tokens = 0
+    session_cost = 0.0
     sess = session.new(cfg, workspace.root)
 
     found = None
@@ -291,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             found = _pick(r, session.listing(workspace.root))
     if found is not None:
-        sess, history, session_tokens = _adopt(r, cfg, workspace, found)
+        sess, history, session_tokens, session_cost = _adopt(r, cfg, workspace, found)
 
     lock = session.Lock(sess.path)
     try:
@@ -328,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if prompt == "/clear":
             history.clear()
-            _persist(r, sess, history, session_tokens)
+            _persist(r, sess, history, session_tokens, session_cost)
             r.note("history cleared")
             continue
         if prompt == "/system":
@@ -348,14 +397,24 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             lock.release()
             lock = new_lock
-            sess, history, session_tokens = _adopt(r, cfg, workspace, chosen)
+            sess, history, session_tokens, session_cost = _adopt(r, cfg, workspace, chosen)
             ctx = 0
             continue
         if prompt == "/compact":
             if _compact_now(r, provider, history):
                 ctx = 0
-                _persist(r, sess, history, session_tokens)
+                _persist(r, sess, history, session_tokens, session_cost)
             continue
+
+        if prompt.startswith("/"):
+            name, _, rest = prompt[1:].partition(" ")
+            command = user_commands.get(name)
+            if command is None:
+                known = ", ".join("/" + n for n in sorted(user_commands))
+                r.warn(f"unknown command /{name}" + (f" — have {known}" if known else ""))
+                continue
+            r.note(f"/{name} ← {command.path.name}")
+            prompt = command.render(rest)
 
         limit = int(cfg.context_window * COMPACT_AT)
         if ctx > limit:
@@ -378,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
             r.thinking()
             try:
                 turn = loop.run_turn(
-                    provider, history, toolset, r.emit, on_tool, approve, system
+                    provider, history, toolset, r.emit, on_tool, approve, system, hooks
                 )
             finally:
                 r.done()
@@ -421,5 +480,12 @@ def main(argv: list[str] | None = None) -> int:
             # Nested loops bill the same account; fold their spend in and reset.
             session_tokens += budget.tokens
             budget.tokens = 0
-            r.usage(_usage_line(usages, len(history), ctx, cfg.context_window, session_tokens))
-        _persist(r, sess, history, session_tokens)
+            cost = turn_cost(usages, cfg)
+            session_cost += cost
+            r.usage(
+                _usage_line(
+                    usages, len(history), ctx, cfg.context_window,
+                    session_tokens, cost, session_cost,
+                )
+            )
+        _persist(r, sess, history, session_tokens, session_cost)

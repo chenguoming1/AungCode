@@ -24,6 +24,15 @@ class ProviderConfig:
     context_window: int
     base_url: str | None = None
     token_param: str = "max_tokens"
+    # USD per million tokens. All zero means "pricing unknown" — no cost shown.
+    price_in: float = 0.0
+    price_out: float = 0.0
+    price_cache_read: float = 0.0
+    price_cache_write: float = 0.0
+
+    @property
+    def priced(self) -> bool:
+        return bool(self.price_in or self.price_out)
 
 
 def load(path: Path | None = None) -> ProviderConfig:
@@ -72,4 +81,8 @@ def load(path: Path | None = None) -> ProviderConfig:
         context_window=int(section.get("context_window", 200_000)),
         base_url=section.get("base_url"),
         token_param=section.get("token_param", "max_tokens"),
+        price_in=float(section.get("price_in", 0)),
+        price_out=float(section.get("price_out", 0)),
+        price_cache_read=float(section.get("price_cache_read", 0)),
+        price_cache_write=float(section.get("price_cache_write", 0)),
     )
