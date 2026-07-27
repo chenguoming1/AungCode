@@ -98,21 +98,47 @@ def load_agent_file(ws: Workspace) -> str | None:
     return text
 
 
-def build_system(ws: Workspace) -> tuple[str, bool]:
-    """Returns the system prompt and whether AGENT.md contributed to it."""
-    parts = [
-        ROLE,
+TASK_ROLE = """\
+You are a subagent handling one delegated investigation. Your tools are
+read-only: you can list, search and read, but you cannot write files, edit
+them, or run commands, and you cannot delegate further.
+
+Your final message is the entire result. The agent that delegated this task
+sees nothing else — not your tool calls, not your reasoning, not the files you
+read. Anything it needs must be stated in that message.
+
+- Answer the question that was asked. Do not widen the scope.
+- Cite concrete evidence: exact paths, line numbers, matched text. Whoever
+  reads your answer cannot see what you saw and cannot check your working.
+- If something could not be determined, say so plainly instead of guessing.
+- Be complete but compact. You are writing a briefing, not a transcript.\
+"""
+
+
+def _context_blocks(ws: Workspace) -> tuple[list[str], bool]:
+    """Environment facts shared by the main agent and any subagent."""
+    blocks = [
         "\n# Environment\n"
         f"working directory: {ws.root}\n"
         f"platform: {platform.system()} {platform.release()} ({platform.machine()})",
         f"\n# Project layout (depth {TREE_DEPTH}, hidden entries omitted)\n{_tree(ws.root)}",
     ]
-
     project = load_agent_file(ws)
     if project:
-        parts.append(
+        blocks.append(
             f"\n# Project instructions ({AGENT_FILE})\n"
             "These come from the project and take precedence over the general "
             f"guidance above.\n\n{project}"
         )
-    return "\n".join(parts), project is not None
+    return blocks, project is not None
+
+
+def build_system(ws: Workspace) -> tuple[str, bool]:
+    """Returns the system prompt and whether AGENT.md contributed to it."""
+    blocks, has_agent_file = _context_blocks(ws)
+    return "\n".join([ROLE, *blocks]), has_agent_file
+
+
+def build_task_system(ws: Workspace) -> str:
+    blocks, _ = _context_blocks(ws)
+    return "\n".join([TASK_ROLE, *blocks])

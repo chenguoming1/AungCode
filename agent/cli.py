@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import compact, loop, session
+from . import compact, loop, session, subagent
 from .config import ConfigError, load
 from .prompt import AGENT_FILE, build_system
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
@@ -236,6 +236,12 @@ def main(argv: list[str] | None = None) -> int:
         r.error(f"config error: workspace {workspace.root} is not a directory")
         return 2
     toolset = list(build_registry(workspace).values())
+    budget = subagent.Budget()
+
+    def on_sub_tool(call: ToolCall, result: ToolResult) -> None:
+        r.tool(f"↳ {call.name}", call.args, preview(result.content), result.is_error)
+
+    toolset.append(subagent.build(provider, workspace, on_sub_tool, budget))
     system, has_agent_file = build_system(workspace)
 
     r.plain(
@@ -400,5 +406,8 @@ def main(argv: list[str] | None = None) -> int:
         if usages:
             ctx = context_size(usages)
             session_tokens += sum(u.input_tokens + u.output_tokens for u in usages)
+            # Nested loops bill the same account; fold their spend in and reset.
+            session_tokens += budget.tokens
+            budget.tokens = 0
             r.usage(_usage_line(usages, len(history), ctx, cfg.context_window, session_tokens))
         _persist(r, sess, history, session_tokens)

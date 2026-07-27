@@ -3,11 +3,36 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 12** — a streaming REPL with a system prompt, conversation
+**Status: Stage 13** — a streaming REPL with a system prompt, conversation
 history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
 `grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
 `bash` tool, `get_current_time`, and an approval prompt before anything that
 mutates the machine. Successful edits print a unified diff to the terminal.
+
+## Subagents
+
+The `task` tool ([`agent/subagent.py`](agent/subagent.py)) runs a nested agent
+loop with a **fresh message list**, a read-only toolset, and its own system
+prompt. Only its final message returns to the parent.
+
+Read-only is derived from the Stage 7 approval flag rather than a name list,
+so the subagent gets exactly the tools that do not mutate the machine —
+`list_files`, `glob`, `grep`, `read_file`, `get_current_time`. `task` is not in
+that set, so subagents cannot recurse.
+
+The point is context economy. A real run:
+
+```
+● task(task='find every TIMEOUT constant…') → Here is the complete report. (+38 lines)
+  subagent finished: 3 api calls, 6189 tokens, 12 msgs discarded
+in 5506 · out 438 · 2 api calls · 4 msgs · ctx 5.9k/1000.0k
+```
+
+Seven files were read and twelve messages produced — none of which entered the
+parent's history, which stayed at 4 messages. Those file contents would
+otherwise have been re-sent on every later turn for the rest of the session.
+
+Nested spend is folded into `session`, so a subagent cannot bill you invisibly.
 
 ## Sessions
 

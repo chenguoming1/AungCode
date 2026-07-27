@@ -317,10 +317,46 @@ print("blocks validate as SDK param types: True")
 PY
 ```
 
+## Stage 13 — subagents
+
+```bash
+mkdir -p /tmp/sub13/src/api /tmp/sub13/src/db && cd /tmp/sub13
+for i in 1 2 3 4 5 6; do
+  printf 'def helper_%d():\n    return %d\n\nTIMEOUT = %d\n' $i $i $((i*10)) > src/api/mod$i.py
+done
+printf 'DB_TIMEOUT = 900\n' > src/db/conn.py
+cd /Users/aungbonaing/develop/personal/Apps/AungCode
+AGENT_WORKSPACE=/tmp/sub13 .venv/bin/python -m agent
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | Check the banner | `9 tools` — the eight from the registry plus `task` |
+| 2 | `use the task tool to find every TIMEOUT constant and report the largest. do not read the files yourself` | `↳`-prefixed nested tool lines, then one `task(...)` result and `subagent finished: N api calls, N tokens, N msgs discarded` |
+| 3 | Look at `msgs` on the usage line | Still 4 — the subagent's reads never entered the parent's history |
+| 4 | Compare `session` against the parent's `in`+`out` | Larger by roughly the subagent's tokens; nested spend is not hidden |
+| 5 | Ask it to `use the task tool to create a file called x.txt` | The subagent cannot: `write_file` is not in its toolset |
+| 6 | Ask a follow-up about a file the subagent read | It must re-read it — the parent never saw the contents, only the summary |
+
+Restriction and failure modes (no API key needed):
+
+```bash
+.venv/bin/python - <<'PY'
+from pathlib import Path
+from agent import subagent
+from agent.tools import Workspace, build_registry
+ws = Workspace(Path("/tmp").resolve())
+ro = [t.name for t in build_registry(ws).values() if not t.requires_approval]
+print("subagent tools:", sorted(ro))
+print("can recurse   :", "task" in ro)          # must be False
+print("fails closed  :", subagent._deny(None))  # must be False
+PY
+```
+
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12*
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12* /tmp/sub13
 ```
