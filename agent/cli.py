@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import os
 import sys
 from pathlib import Path
 
-from . import compact, loop, session, subagent
+from . import compact, loop, mcp, session, subagent
 from .config import ConfigError, load
 from .prompt import AGENT_FILE, build_system
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
@@ -236,6 +237,17 @@ def main(argv: list[str] | None = None) -> int:
         r.error(f"config error: workspace {workspace.root} is not a directory")
         return 2
     toolset = list(build_registry(workspace).values())
+
+    servers = mcp.connect(workspace.root, r.warn)
+    if servers:
+        atexit.register(lambda: [s.close() for s in servers])
+        mcp_tools = mcp.tools_for(servers, r.warn)
+        toolset.extend(mcp_tools)
+        r.note(
+            f"mcp: {len(mcp_tools)} tools from "
+            + ", ".join(f"{s.name} ({s.info.get('name', '?')})" for s in servers)
+        )
+
     budget = subagent.Budget()
 
     def on_sub_tool(call: ToolCall, result: ToolResult) -> None:

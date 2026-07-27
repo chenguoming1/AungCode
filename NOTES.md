@@ -353,10 +353,102 @@ print("fails closed  :", subagent._deny(None))  # must be False
 PY
 ```
 
+## Stage 14 — MCP client
+
+Fixture: a mock MCP server, so this needs no npm and no network. Save as
+`/tmp/mcp14/mock_server.py`:
+
+```python
+import json, sys
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n"); sys.stdout.flush()
+
+TOOLS = [
+    {"name": "echo", "description": "Echo the given text back.",
+     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}},
+                     "required": ["text"]}},
+    {"name": "fail", "description": "Always returns an error result.",
+     "inputSchema": {"type": "object"}},
+]
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method, rid = msg.get("method"), msg.get("id")
+    print(f"mock: received {method}", file=sys.stderr, flush=True)
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+            "serverInfo": {"name": "mock-server", "version": "1.0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})
+    elif method == "tools/call":
+        p = msg.get("params") or {}
+        name, args = p.get("name"), p.get("arguments") or {}
+        if name == "echo":
+            send({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": f"echo: {args.get('text', '')}"}]}})
+        elif name == "fail":
+            send({"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": "deliberate failure"}],
+                "isError": True}})
+```
+
+And `/tmp/mcp14/.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mock":   { "command": "python3", "args": ["/tmp/mcp14/mock_server.py"] },
+    "broken": { "command": "definitely-not-installed", "args": [] }
+  }
+}
+```
+
+Then `AGENT_WORKSPACE=/tmp/mcp14 .venv/bin/python -m agent`.
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | Read the startup lines | `mcp: broken: command not found: …` then `mcp: 2 tools from mock (mock-server)` — a bad server warns, it does not abort |
+| 2 | Check the banner | `11 tools` — 8 built-in, `task`, and 2 from MCP |
+| 3 | `use the mcp echo tool to echo: bridges work` | Approval prompt for `mcp__mock__echo`, then `→ echo: bridges work` |
+| 4 | `use the mcp fail tool` | `✗` with `deliberate failure` — `isError` becomes a tool error the model can react to |
+| 5 | Remove `.mcp.json` and restart | No mcp lines, `9 tools`, nothing else changes |
+
+Failure modes and isolation, no API key needed:
+
+```bash
+.venv/bin/python - <<'PY'
+import time
+from pathlib import Path
+from agent import mcp
+from agent.tools import Workspace, build_registry
+
+# a server that exits immediately is caught fast, not at the full timeout
+d = mcp.Server("dead", {"command": "python3", "args": ["-c", "raise SystemExit(3)"]}, Path("/tmp"))
+t0 = time.time()
+try: d.start()
+except mcp.MCPError as e: print(f"{e}  (after {time.time()-t0:.2f}s)")
+d.close()
+
+# MCP tools are never handed to subagents
+ws = Workspace(Path("/tmp/mcp14").resolve())
+servers = mcp.connect(ws.root, print)
+tools = list(build_registry(ws).values()) + mcp.tools_for(servers, print)
+ro = [t.name for t in tools if not t.requires_approval]
+print("subagent tools:", sorted(ro))
+print("includes mcp  :", any(n.startswith("mcp__") for n in ro))   # must be False
+[s.close() for s in servers]
+PY
+```
+
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12* /tmp/sub13
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12* /tmp/sub13 /tmp/mcp14
 ```

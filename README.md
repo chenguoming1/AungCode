@@ -3,11 +3,45 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 13** — a streaming REPL with a system prompt, conversation
+**Status: Stage 14** — a streaming REPL with a system prompt, conversation
 history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
 `grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
 `bash` tool, `get_current_time`, and an approval prompt before anything that
 mutates the machine. Successful edits print a unified diff to the terminal.
+
+## MCP servers
+
+[`agent/mcp.py`](agent/mcp.py) is a minimal MCP client over stdio: newline
+delimited JSON-RPC 2.0, `initialize` → `notifications/initialized` →
+`tools/list`, then `tools/call` on demand.
+
+Servers are declared in `.mcp.json` at the workspace root (override with
+`AGENT_MCP_CONFIG`):
+
+```json
+{
+  "mcpServers": {
+    "mock": { "command": "python3", "args": ["/tmp/mcp14/mock_server.py"] }
+  }
+}
+```
+
+Discovered tools are namespaced `mcp__<server>__<tool>`, so two servers can
+both expose `search` without colliding, and they are merged into the same
+registry as the built-ins — the agent loop cannot tell them apart.
+
+Three deliberate choices:
+
+- **Every MCP tool requires approval.** A server can do anything and there is
+  no way to know what, so they are all treated as mutating. A consequence is
+  that subagents never receive them: the read-only set is derived from that
+  same flag.
+- **A failing server is skipped, not fatal.** A missing command, a bad config,
+  a server that exits or never answers — each produces a warning and the agent
+  runs without it.
+- **Requests have deadlines.** A reader thread drains stdout into a queue so a
+  wedged server times out instead of hanging the REPL, and a server that dies
+  is detected within ~0.25s rather than at the timeout.
 
 ## Subagents
 
