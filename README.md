@@ -3,11 +3,30 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 10** — a streaming REPL with a system prompt, conversation
+**Status: Stage 11** — a streaming REPL with a system prompt, conversation
 history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
 `grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
 `bash` tool, `get_current_time`, and an approval prompt before anything that
 mutates the machine. Successful edits print a unified diff to the terminal.
+
+## Terminal rendering
+
+All terminal output goes through [`agent/render.py`](agent/render.py) — a
+spinner while the model is working, collapsed colour-coded tool lines,
+diff colouring, and line-buffered markdown for prose (headings, bold, inline
+code, bullets, fenced blocks with light syntax colouring).
+
+Nothing else in the package writes to a stream: `loop.py`, `providers.py`,
+`tools.py` and `compact.py` are render-free, so the display can change without
+touching the agent.
+
+**It degrades on its own.** When stdout is not a terminal, markdown and colour
+are dropped and the raw text is passed through; when stderr is not a terminal
+the spinner never starts. Piping stays byte-clean:
+
+```bash
+echo "say hi" | .venv/bin/python -m agent > out.txt   # reply only, no ANSI
+```
 
 ## System prompt
 
@@ -82,6 +101,8 @@ and a callable. Nothing else in the codebase needs to change.
 Manual verification steps for every stage are in [NOTES.md](NOTES.md).
 How context, the four caps, compaction and cost fit together — with real
 numbers — is in [CONTEXT.md](CONTEXT.md).
+Known gaps in the render layer, and the options for closing them, are in
+[RENDERING.md](RENDERING.md).
 
 ## Workspace
 

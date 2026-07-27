@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-import sys
-
 import logging
 import os
+import sys
 from pathlib import Path
 
 from . import compact, loop
 from .config import ConfigError, load
 from .prompt import AGENT_FILE, build_system
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
+from .render import Renderer, fmt_args, preview
 from .tools import ToolError, Workspace, build_registry
 
 APPROVE_ALL = os.environ.get("AGENT_APPROVE_ALL") == "1"
+
+# Compact once the prompt passes this share of the model's context window.
+COMPACT_AT = 0.75
 
 
 def _block(prefix: str, text: str, limit: int = 20) -> str:
@@ -25,8 +28,9 @@ def _block(prefix: str, text: str, limit: int = 20) -> str:
     return "\n".join(out)
 
 
-def _render_action(call: ToolCall, workspace: Workspace) -> str:
-    """The exact thing about to happen — never abbreviated."""
+def _action_text(call: ToolCall, workspace: Workspace) -> str:
+    """The exact thing about to happen — never abbreviated. Colouring is the
+    renderer's job; this only decides what the words are."""
     args = call.args
     if call.name == "bash":
         return f"  $ {args.get('command', '')}"
@@ -51,26 +55,28 @@ def _render_action(call: ToolCall, workspace: Workspace) -> str:
             f"{_block('+', args.get('new_str', ''))}"
         )
 
-    return f"  {call.name}({_fmt_args(call.args)})"
+    return f"  {call.name}({fmt_args(call.args)})"
 
 
-def _approver(workspace: Workspace, always: set[str]):
+def _approver(r: Renderer, workspace: Workspace, always: set[str]):
     def approve(call: ToolCall) -> bool:
-        action = _render_action(call, workspace)
+        action = _action_text(call, workspace)
         if APPROVE_ALL:
-            print(f"\n[auto-approved]\n{action}", file=sys.stderr)
+            r.note("auto-approved")
+            r.action(action)
             return True
         if call.name in always:
-            print(f"\n[approved: always]\n{action}", file=sys.stderr)
+            r.note(f"approved: always ({call.name})")
+            r.action(action)
             return True
 
-        print(f"\n{action}", file=sys.stderr)
+        r.action(action)
         while True:
-            print(f"approve {call.name}? [y/N/a=always] ", end="", file=sys.stderr, flush=True)
+            r.prompt(f"approve {call.name}? [y/N/a=always] ")
             try:
                 reply = input().strip().lower()
             except EOFError:
-                print("(no input — denied)", file=sys.stderr)
+                r.note("(no input — denied)")
                 return False
             if reply in ("y", "yes"):
                 return True
@@ -81,46 +87,6 @@ def _approver(workspace: Workspace, always: set[str]):
                 return False
 
     return approve
-
-
-def _preview(text: str, width: int = 96) -> str:
-    """Tool results can be whole files; keep the transcript readable."""
-    first, _, rest = text.partition("\n")
-    if len(first) > width:
-        first = first[:width] + "…"
-    extra = text.count("\n")
-    return f"{first} (+{extra} lines)" if rest else first
-
-
-def _fmt_args(args: dict, width: int = 44) -> str:
-    """Edit and write calls carry whole file bodies — never print them raw."""
-    bits = []
-    for key, value in args.items():
-        if not isinstance(value, str):
-            bits.append(f"{key}={value!r}")
-            continue
-        text = value.replace("\n", "\\n")
-        if len(text) > width:
-            text = text[:width] + "…"
-        bits.append(f"{key}={text!r}")
-    return ", ".join(bits)
-
-
-_DIFF_COLORS = {"+": "\033[32m", "-": "\033[31m", "@": "\033[36m"}
-
-
-def _colorize(diff: str) -> str:
-    if not sys.stderr.isatty():
-        return diff
-    out = []
-    for line in diff.splitlines():
-        color = None if line.startswith(("+++", "---")) else _DIFF_COLORS.get(line[:1])
-        out.append(f"{color}{line}\033[0m" if color else line)
-    return "\n".join(out)
-
-
-# Compact once the prompt passes this share of the model's context window.
-COMPACT_AT = 0.75
 
 
 def _fmt_tokens(n: int) -> str:
@@ -155,28 +121,29 @@ def _usage_line(usages: list[Usage], msgs: int, ctx: int, window: int, session: 
     return " · ".join(parts)
 
 
-def _compact_now(provider, history: list[Message]) -> bool:
+def _compact_now(r: Renderer, provider, history: list[Message]) -> bool:
+    r.thinking("compacting…")
     try:
         result = compact.compact(provider, history)
     except STREAM_ERRORS as e:
-        print(f"[compaction failed: {type(e).__name__}: {e}]", file=sys.stderr)
+        r.error(f"compaction failed: {type(e).__name__}: {e}")
         return False
+    finally:
+        r.done()
     if result is None:
-        print(
-            f"[nothing to compact — fewer than {compact.KEEP_TURNS} earlier turns]",
-            file=sys.stderr,
-        )
+        r.note(f"nothing to compact — fewer than {compact.KEEP_TURNS} earlier turns")
         return False
     history[:] = result.messages
-    print(
-        f"[compacted {result.removed} messages into a summary; "
-        f"{len(history)} msgs now, last {compact.KEEP_TURNS} turns kept verbatim]",
-        file=sys.stderr,
+    r.note(
+        f"compacted {result.removed} messages into a summary; "
+        f"{len(history)} msgs now, last {compact.KEEP_TURNS} turns kept verbatim"
     )
     return True
 
 
 def main() -> int:
+    r = Renderer()
+
     # Warnings and tracebacks go to stderr so stdout stays pipeable.
     # AGENT_DEBUG=1 adds the SDKs' own debug chatter.
     logging.basicConfig(
@@ -188,46 +155,48 @@ def main() -> int:
     try:
         cfg = load()
     except ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
+        r.error(f"config error: {e}")
         return 2
 
     provider = build(cfg)
     workspace = Workspace(Path(os.environ.get("AGENT_WORKSPACE", ".")).resolve())
     if not workspace.root.is_dir():
-        print(f"config error: workspace {workspace.root} is not a directory", file=sys.stderr)
+        r.error(f"config error: workspace {workspace.root} is not a directory")
         return 2
     toolset = list(build_registry(workspace).values())
     system, has_agent_file = build_system(workspace)
 
-    print(
-        f"{cfg.profile}:{cfg.model} · {len(toolset)} tool{'s' * (len(toolset) != 1)} — "
-        "/clear resets history, /compact summarizes it, /system shows the prompt, "
-        "/exit or Ctrl-D quits, Ctrl-C cancels a turn",
-        file=sys.stderr,
+    r.plain(
+        f"{r.e.bold(cfg.profile + ':' + cfg.model)} · "
+        f"{len(toolset)} tool{'s' * (len(toolset) != 1)}"
     )
-    print(
+    r.note(
+        "/clear resets history · /compact summarizes it · /system shows the prompt · "
+        "/exit quits · Ctrl-C cancels a turn"
+    )
+    r.note(
         f"workspace: {workspace.root}"
-        + (f" · {AGENT_FILE} loaded" if has_agent_file else ""),
-        file=sys.stderr,
+        + (f" · {AGENT_FILE} loaded" if has_agent_file else "")
     )
     if APPROVE_ALL:
-        print("AGENT_APPROVE_ALL=1 — every action runs unattended", file=sys.stderr)
+        r.warn("AGENT_APPROVE_ALL=1 — every action runs unattended")
 
     history: list[Message] = []
     # "always" decisions last for this process only, never written to disk.
     always: set[str] = set()
-    approve = _approver(workspace, always)
+    approve = _approver(r, workspace, always)
     ctx = 0  # 0 means "unknown until the next reply measures it"
     session_tokens = 0
 
     while True:
         try:
-            prompt = input("> ")
+            r.prompt(r.e.bold("› "))
+            prompt = input()
         except EOFError:
-            print(file=sys.stderr)
+            r.plain("")
             return 0
         except KeyboardInterrupt:
-            print(file=sys.stderr)
+            r.plain("")
             continue
 
         prompt = prompt.strip()
@@ -237,84 +206,75 @@ def main() -> int:
             return 0
         if prompt == "/clear":
             history.clear()
-            print("[history cleared]", file=sys.stderr)
+            r.note("history cleared")
             continue
         if prompt == "/system":
-            print(system, file=sys.stderr)
+            r.plain(system)
             continue
         if prompt == "/compact":
-            if _compact_now(provider, history):
+            if _compact_now(r, provider, history):
                 ctx = 0
             continue
 
         limit = int(cfg.context_window * COMPACT_AT)
         if ctx > limit:
-            print(
-                f"[context {_fmt_tokens(ctx)} over the "
-                f"{_fmt_tokens(limit)} threshold]",
-                file=sys.stderr,
-            )
-            if _compact_now(provider, history):
+            r.warn(f"context {_fmt_tokens(ctx)} over the {_fmt_tokens(limit)} threshold")
+            if _compact_now(r, provider, history):
                 ctx = 0
 
         # A tool turn appends several messages; rollback truncates to here.
         mark = len(history)
         history.append({"role": "user", "content": prompt})
 
-        def emit(text: str) -> None:
-            sys.stdout.write(text)
-            sys.stdout.flush()
-
         def on_tool(call: ToolCall, result: ToolResult) -> None:
-            arrow = "!!" if result.is_error else "->"
-            print(
-                f"\n[tool] {call.name}({_fmt_args(call.args)}) "
-                f"{arrow} {_preview(result.content)}",
-                file=sys.stderr,
-            )
+            r.tool(call.name, call.args, preview(result.content), result.is_error)
             if result.display:
-                print(_colorize(result.display), file=sys.stderr)
+                r.diff(result.display)
+            # Another API call always follows a tool result.
+            r.waiting("working…")
 
         try:
-            turn = loop.run_turn(
-                provider, history, toolset, emit, on_tool, approve, system
-            )
+            r.thinking()
+            try:
+                turn = loop.run_turn(
+                    provider, history, toolset, r.emit, on_tool, approve, system
+                )
+            finally:
+                r.done()
             usages = turn.usages
         except KeyboardInterrupt:
             del history[mark:]
-            print("\n[cancelled — turn discarded]", file=sys.stderr)
+            r.flush()
+            r.note("cancelled — turn discarded")
             continue
         except loop.MaxIterations as e:
             del history[mark:]
-            print(f"\n[{e} — turn discarded]", file=sys.stderr)
+            r.flush()
+            r.warn(f"{e} — turn discarded")
             continue
         except STREAM_ERRORS as e:
             del history[mark:]
-            sys.stdout.flush()
-            print(f"\n[{type(e).__name__}] {e}", file=sys.stderr)
+            r.flush()
+            r.error(f"{type(e).__name__}: {e}")
             logging.getLogger("agent").debug("stream error detail", exc_info=True)
             continue
         except Exception:
             # Never lose the session to an unforeseen bug — but never hide it
             # either. The full traceback is printed before we carry on.
             del history[mark:]
-            sys.stdout.flush()
+            r.flush()
             logging.getLogger("agent").exception("unexpected error during turn")
-            print("\n[unexpected error above — turn discarded]", file=sys.stderr)
+            r.error("unexpected error above — turn discarded")
             continue
 
-        print()
+        r.flush()
         if turn.stop_reason == "max_tokens":
-            print(
-                f"[response hit max_tokens ({cfg.max_tokens}); it was cut off and any "
+            r.warn(
+                f"response hit max_tokens ({cfg.max_tokens}); it was cut off and any "
                 "half-written tool call was dropped. Raise max_tokens in "
-                "agent/config.toml or ask for smaller steps]",
-                file=sys.stderr,
+                "agent/config.toml or ask for smaller steps"
             )
         if usages:
             ctx = context_size(usages)
             session_tokens += sum(u.input_tokens + u.output_tokens for u in usages)
-            print(
-                f"[{_usage_line(usages, len(history), ctx, cfg.context_window, session_tokens)}]",
-                file=sys.stderr,
-            )
+            r.usage(_usage_line(usages, len(history), ctx, cfg.context_window, session_tokens))

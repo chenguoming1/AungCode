@@ -234,6 +234,35 @@ h=[{'role':'user','content':f'q{i}'} if i%2==0 else {'role':'assistant','content
 c=find_cut(h,4); print('cut',c,'role',h[c]['role'],'plain str',isinstance(h[c]['content'],str))"
 ```
 
+## Stage 11 — rendering
+
+Must be run in a real terminal; most of this is invisible when piped.
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | Ask anything slow | A braille spinner `⠋ thinking…` on stderr, replaced the instant the first token arrives — no leftover frame on the line |
+| 2 | `ask for a **bold** word, \`inline code\`, and a bullet list` | Bold renders bold, inline code cyan, bullets as `•` — the markers themselves are gone |
+| 3 | `show me a python function in a code block` | Fence dimmed; keywords magenta, strings green, comments dim |
+| 4 | Any tool call | One collapsed line: `● read_file(path='x.py') → …`; green `●` on success, red `✗` on error |
+| 5 | Any successful `edit_file` | Diff with green additions, red deletions, cyan `@@` hunk headers |
+| 6 | An approval prompt for `bash` | The command in bold yellow; for `write_file` on an existing file, `OVERWRITES` in bold red |
+| 7 | After a tool result | Spinner returns as `⠋ working…` while the next API call runs |
+
+Degradation (no terminal needed):
+
+```bash
+echo "say hi" | .venv/bin/python -m agent > /tmp/o.txt 2>/tmp/e.txt
+grep -c $'\033' /tmp/o.txt   # 0 — no ANSI on stdout
+grep -c $'\033' /tmp/e.txt   # 0 — no ANSI on stderr either
+head -c 40 /tmp/o.txt        # reply only: no banner, no '›' prompt
+```
+
+Layer separation — should print nothing:
+
+```bash
+grep -l 'from .render' agent/loop.py agent/providers.py agent/tools.py agent/compact.py
+```
+
 ---
 
 ## Cleanup

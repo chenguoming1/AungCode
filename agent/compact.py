@@ -85,7 +85,7 @@ def _render_message(message: Message) -> str:
     return f"{role}: {body}".strip()
 
 
-def render(messages: list[Message]) -> str:
+def transcript(messages: list[Message]) -> str:
     text = "\n\n".join(_render_message(m) for m in messages)
     if len(text) > MAX_RENDER_CHARS:
         half = MAX_RENDER_CHARS // 2
@@ -120,7 +120,7 @@ def compact(
     if cut is None:
         return None
 
-    summary = provider.summarize(render(messages[:cut]), SUMMARY_INSTRUCTION)
+    summary = provider.summarize(transcript(messages[:cut]), SUMMARY_INSTRUCTION)
     if not summary:
         return None
 
