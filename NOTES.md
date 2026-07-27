@@ -263,10 +263,64 @@ Layer separation — should print nothing:
 grep -l 'from .render' agent/loop.py agent/providers.py agent/tools.py agent/compact.py
 ```
 
+## Stage 12 — session persistence
+
+```bash
+export AGENT_SESSION_DIR=/tmp/sess12   # keep test sessions out of ~/.agent
+mkdir -p /tmp/ws12
+cd /Users/aungbonaing/develop/personal/Apps/AungCode
+```
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | `AGENT_WORKSPACE=/tmp/ws12 .venv/bin/python -m agent`, say `remember the magic number is 4471`, `/exit` | Banner shows `session: <id>`; `ls $AGENT_SESSION_DIR` has one `.jsonl` |
+| 2 | Relaunch with `--continue`, ask `what is the magic number?` | `resumed <id> — N msgs, X tokens previously`, and it answers 4471 |
+| 3 | Check `session N` on the usage line | Continues from the earlier total; it does **not** reset |
+| 4 | `--resume <id>` | Same session by id |
+| 5 | `--resume nope` | `no session with id 'nope'`, exit code 2 |
+| 6 | `--resume` with no id | Numbered list; picking 1 resumes it; blank cancels |
+| 7 | `/sessions` mid-run | Same picker; choosing swaps history in place |
+| 8 | `--resume <id>` with a different `AGENT_WORKSPACE` | `session was recorded in … — tools now target …` |
+| 9 | Resume a session, then trigger a `bash` call | It still asks for approval — `always` is never persisted |
+| 10 | Leave a session open in tab 1; in tab 2 run `--resume <same id>` | `session … is already open in another process (pid N since …)`, exit code 2. Same for `--continue` |
+| 11 | `/exit` tab 1, retry tab 2 | Resumes normally — the lock released with the process |
+| 12 | `kill -9` tab 1 instead, retry tab 2 | Also resumes. `flock` is dropped by the kernel, so there is no stale-lock state to clean up |
+| 13 | Two tabs on **different** sessions | Both work; the lock is per session, not global |
+
+Without the lock, two tabs on one session silently destroy each other's work —
+both load the same history, and whichever saves last overwrites the other,
+token counter included.
+
+Round-trip fidelity (no API key needed) — the load-bearing check:
+
+```bash
+.venv/bin/python - <<'PY'
+import json, types
+from pathlib import Path
+from anthropic.types import TextBlock, ToolUseBlock, TextBlockParam, ToolUseBlockParam
+from agent import session
+cfg = types.SimpleNamespace(profile="anthropic", model="claude-opus-4-8")
+s = session.new(cfg, Path("/tmp/ws12"))
+h = [{"role": "user", "content": "hi"},
+     {"role": "assistant", "content": [
+         TextBlock(type="text", text="looking", citations=None),
+         ToolUseBlock(type="tool_use", id="t1", name="read_file", input={"path": "a.py"})]},
+     {"role": "assistant", "content": None, "tool_calls": [
+         {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}]
+session.save(s, h, 1234)
+_, back = session.read(s.path)
+print("identical:", json.dumps(session._jsonable(h), sort_keys=True)
+                 == json.dumps(session._jsonable(back), sort_keys=True))
+print("null content kept:", back[2]["content"] is None)
+TextBlockParam(**back[1]["content"][0]); ToolUseBlockParam(**back[1]["content"][1])
+print("blocks validate as SDK param types: True")
+PY
+```
+
 ---
 
 ## Cleanup
 
 ```bash
-rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9
+rm -rf /tmp/sandbox /tmp/edit5 /tmp/proj6 /tmp/appr7 /tmp/g8 /tmp/p9 /tmp/ws12 /tmp/sess12*
 ```

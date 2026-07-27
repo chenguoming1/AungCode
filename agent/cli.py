@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
 from pathlib import Path
 
-from . import compact, loop
+from . import compact, loop, session
 from .config import ConfigError, load
 from .prompt import AGENT_FILE, build_system
 from .providers import STREAM_ERRORS, Message, ToolCall, ToolResult, Usage, build
@@ -72,9 +73,8 @@ def _approver(r: Renderer, workspace: Workspace, always: set[str]):
 
         r.action(action)
         while True:
-            r.prompt(f"approve {call.name}? [y/N/a=always] ")
             try:
-                reply = input().strip().lower()
+                reply = _ask(r, f"approve {call.name}? [y/N/a=always] ").strip().lower()
             except EOFError:
                 r.note("(no input — denied)")
                 return False
@@ -87,6 +87,77 @@ def _approver(r: Renderer, workspace: Workspace, always: set[str]):
                 return False
 
     return approve
+
+
+def _ask(r: Renderer, text: str) -> str:
+    """Prompt and read a line. Piped stdin has no terminal echo, so the
+    prompt line is closed by hand to keep transcripts readable."""
+    r.prompt(text)
+    reply = input()
+    if not sys.stdin.isatty():
+        r.plain("")
+    return reply
+
+
+def _parse_args(argv: list[str] | None):
+    p = argparse.ArgumentParser(prog="agent", description="A small coding agent.")
+    p.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        metavar="ID",
+        help="resume a session by id; give no id to choose from a list",
+    )
+    p.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="resume the most recent session for this workspace",
+    )
+    return p.parse_args(argv)
+
+
+def _pick(r: Renderer, sessions: list[session.Session]) -> session.Session | None:
+    if not sessions:
+        r.note("no saved sessions for this workspace")
+        return None
+    shown = sessions[:20]
+    for i, s in enumerate(shown, 1):
+        r.plain(f"  {r.e.cyan(str(i).rjust(2))}. {session.describe(s)}")
+    try:
+        reply = _ask(r, "session number (blank to cancel): ").strip()
+    except EOFError:
+        return None
+    if reply.isdigit() and 1 <= int(reply) <= len(shown):
+        return shown[int(reply) - 1]
+    return None
+
+
+def _adopt(r: Renderer, cfg, workspace: Workspace, found: session.Session):
+    """Load a session's messages, warning about anything that changed."""
+    sess, messages = session.read(found.path)
+    if sess.meta.get("workspace") != str(workspace.root):
+        r.warn(
+            f"session was recorded in {sess.meta.get('workspace')} — "
+            f"tools now target {workspace.root}"
+        )
+    if sess.meta.get("model") != cfg.model:
+        r.warn(
+            f"session used {sess.meta.get('provider')}:{sess.meta.get('model')} — "
+            f"now {cfg.profile}:{cfg.model}"
+        )
+    r.note(
+        f"resumed {sess.id} — {len(messages)} msgs, "
+        f"{_fmt_tokens(int(sess.meta.get('session_tokens', 0)))} tokens previously"
+    )
+    return sess, messages, int(sess.meta.get("session_tokens", 0))
+
+
+def _persist(r: Renderer, sess: session.Session, history: list[Message], tokens: int) -> None:
+    try:
+        session.save(sess, history, tokens)
+    except OSError as e:
+        r.warn(f"could not save session: {e}")
 
 
 def _fmt_tokens(n: int) -> str:
@@ -141,7 +212,8 @@ def _compact_now(r: Renderer, provider, history: list[Message]) -> bool:
     return True
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     r = Renderer()
 
     # Warnings and tracebacks go to stderr so stdout stays pipeable.
@@ -172,7 +244,7 @@ def main() -> int:
     )
     r.note(
         "/clear resets history · /compact summarizes it · /system shows the prompt · "
-        "/exit quits · Ctrl-C cancels a turn"
+        "/sessions switches session · /exit quits · Ctrl-C cancels a turn"
     )
     r.note(
         f"workspace: {workspace.root}"
@@ -182,16 +254,48 @@ def main() -> int:
         r.warn("AGENT_APPROVE_ALL=1 — every action runs unattended")
 
     history: list[Message] = []
-    # "always" decisions last for this process only, never written to disk.
+    session_tokens = 0
+    sess = session.new(cfg, workspace.root)
+
+    found = None
+    if args.continue_:
+        found = session.most_recent(workspace.root)
+        if found is None:
+            r.note("no previous session for this workspace — starting a new one")
+    elif args.resume is not None:
+        if args.resume:
+            found = next(
+                (s for s in session.listing() if s.id == args.resume), None
+            )
+            if found is None:
+                r.error(f"no session with id {args.resume!r}")
+                return 2
+        else:
+            found = _pick(r, session.listing(workspace.root))
+    if found is not None:
+        sess, history, session_tokens = _adopt(r, cfg, workspace, found)
+
+    lock = session.Lock(sess.path)
+    try:
+        lock.acquire()
+    except session.SessionBusy as holder:
+        r.error(
+            f"session {sess.id} is already open in another process ({holder}). "
+            "Close it first, or resume a different session."
+        )
+        return 2
+
+    r.note(f"session: {sess.id}")
+
+    # "always" decisions last for this process only, never written to disk —
+    # resuming must not silently re-grant approval you gave yesterday.
     always: set[str] = set()
     approve = _approver(r, workspace, always)
     ctx = 0  # 0 means "unknown until the next reply measures it"
-    session_tokens = 0
 
     while True:
         try:
-            r.prompt(r.e.bold("› "))
-            prompt = input()
+            prompt = _ask(r, r.e.bold("› "))
         except EOFError:
             r.plain("")
             return 0
@@ -206,14 +310,33 @@ def main() -> int:
             return 0
         if prompt == "/clear":
             history.clear()
+            _persist(r, sess, history, session_tokens)
             r.note("history cleared")
             continue
         if prompt == "/system":
             r.plain(system)
             continue
+        if prompt == "/sessions":
+            chosen = _pick(r, session.listing(workspace.root))
+            if chosen is None or chosen.id == sess.id:
+                continue
+            # Take the new lock before dropping the old one, so a refused
+            # switch leaves this tab exactly where it was.
+            new_lock = session.Lock(chosen.path)
+            try:
+                new_lock.acquire()
+            except session.SessionBusy as holder:
+                r.error(f"cannot switch: {chosen.id} is open elsewhere ({holder})")
+                continue
+            lock.release()
+            lock = new_lock
+            sess, history, session_tokens = _adopt(r, cfg, workspace, chosen)
+            ctx = 0
+            continue
         if prompt == "/compact":
             if _compact_now(r, provider, history):
                 ctx = 0
+                _persist(r, sess, history, session_tokens)
             continue
 
         limit = int(cfg.context_window * COMPACT_AT)
@@ -278,3 +401,4 @@ def main() -> int:
             ctx = context_size(usages)
             session_tokens += sum(u.input_tokens + u.output_tokens for u in usages)
             r.usage(_usage_line(usages, len(history), ctx, cfg.context_window, session_tokens))
+        _persist(r, sess, history, session_tokens)

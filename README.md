@@ -3,11 +3,57 @@
 A coding agent CLI, built incrementally as a learning exercise. Python 3.11+,
 official provider SDKs, stdlib everywhere else. No frameworks.
 
-**Status: Stage 11** — a streaming REPL with a system prompt, conversation
+**Status: Stage 12** — a streaming REPL with a system prompt, conversation
 history, per-turn token accounting, a tool-use loop, discovery tools (`glob`,
 `grep`), file tools (`list_files`, `read_file`, `write_file`, `edit_file`), a
 `bash` tool, `get_current_time`, and an approval prompt before anything that
 mutates the machine. Successful edits print a unified diff to the terminal.
+
+## Sessions
+
+Every turn is written to `~/.agent/sessions/<id>.jsonl` (override with
+`AGENT_SESSION_DIR`). Line 1 is metadata; every later line is one message.
+
+```bash
+.venv/bin/python -m agent --continue      # most recent session for this workspace
+.venv/bin/python -m agent --resume ID     # a specific session
+.venv/bin/python -m agent --resume        # choose from a list
+```
+
+`/sessions` switches session mid-run. Cumulative token spend carries across
+resumes, so `session N` keeps counting where it left off.
+
+Messages are stored through the SDK's own `model_dump`, so an Anthropic
+assistant turn — which lives in memory as content-block *objects* — reloads as
+dicts that produce the same request bytes. History is rewritten whole on each
+turn (rollback and compaction mutate it in place) via a temp file and
+`os.replace`, so a crash mid-write cannot corrupt a session.
+
+Two things deliberately do **not** persist: approval decisions (`a` for always
+is re-earned every run — resuming must not silently re-grant yesterday's
+trust), and the system prompt, which is rebuilt from the current workspace.
+Resuming warns if the workspace or model differs from the one recorded.
+
+### One process per session
+
+A session is locked while open. A second tab resuming the same id is refused:
+
+```
+session 20260727-144126-9954 is already open in another process
+(pid 53098 since 2026-07-27 14:42:32). Close it first, or resume a
+different session.
+```
+
+Without this, both tabs load the same history and the last one to save wins —
+silently discarding everything the other did, and rolling the token counter
+backwards.
+
+The lock is an advisory `flock` on a `<id>.lock` sidecar. Two consequences
+worth knowing: the kernel drops it when the process dies, so a crashed or
+killed tab never leaves a stale lock; and it is a sidecar rather than the
+`.jsonl` itself because `save()` replaces that file's inode, which would
+strand a lock taken on it. On non-POSIX platforms `fcntl` is unavailable and
+locking degrades to a no-op.
 
 ## Terminal rendering
 
