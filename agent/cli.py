@@ -271,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         r.error(f"config error: {e}")
         return 2
 
+    session.configure(cfg.session_dir)
     provider = build(cfg)
     workspace = Workspace(Path(os.environ.get("AGENT_WORKSPACE", ".")).resolve())
     if not workspace.root.is_dir():
@@ -468,6 +469,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         r.flush()
+        if turn.stop_reason == "repeated_calls":
+            r.warn(
+                "the model kept making the same call with the same result; "
+                "the turn was stopped rather than looping"
+            )
+        if turn.stop_reason == "denied_repeat":
+            r.warn(
+                "the model asked again for an action you already refused; "
+                "the turn was stopped rather than looping"
+            )
         if turn.stop_reason == "max_tokens":
             r.warn(
                 f"response hit max_tokens ({cfg.max_tokens}); it was cut off and any "

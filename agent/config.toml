@@ -1,6 +1,10 @@
 # Active provider. Override at runtime with AGENT_PROVIDER=openai
 provider = "github"
 
+# Where session transcripts live. Defaults to ~/.aungcode/sessions.
+# AGENT_SESSION_DIR overrides this for a single run.
+# session_dir = "~/.aungcode/sessions"
+
 # max_tokens caps a single response. You are billed for tokens generated, not
 # for the cap, so a generous value costs nothing until it is used. The values
 # below are deliberately below each model's ceiling (noted per profile) — a
@@ -48,6 +52,38 @@ context_window = 1000000
 price_in = 0.14
 price_out = 0.28
 price_cache_read = 0.0028
+
+# Local OpenAI-compatible server (MLX, llama.cpp, Ollama, vLLM, LM Studio).
+# No secret to protect, so the key is inline rather than an env var — most
+# local servers ignore it entirely but the SDK requires something non-empty.
+# No prices: nothing is billed, so no cost is reported.
+# context_window should match how the server was started; too low only means
+# compaction fires early, too high fails hard.
+# MLX on this machine.
+[providers.local]
+kind = "openai"
+# Must match what the server reports at GET <base_url>/models, exactly.
+model = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit-dwq-v2"
+api_key_env = "LOCAL_API_KEY"
+base_url = "http://127.0.0.1:8080/v1"
+max_tokens = 8192
+context_window = 32768
+# Sent only when set, and only on `kind = "openai"` profiles — recent Claude
+# models reject `temperature` with a 400, so the anthropic path never sends it.
+# 0 makes runs repeatable, which is what makes failures worth investigating.
+temperature = 0
+
+# llama.cpp on the other laptop, reached over the LAN. That server is started
+# with --api-key, so LOCAL_LAN_API_KEY must match it.
+[providers.local-lan]
+kind = "openai"
+model = "C:\\Users\\cheng\\models2\\Qwen3-Coder-30B-A3B-Instruct-Q4_0.gguf"
+api_key_env = "LOCAL_LAN_API_KEY"
+#base_url = "http://192.168.1.29:8080/v1"
+base_url = "http://10.9.9.79:8080/v1"
+max_tokens = 8192
+context_window = 32768
+temperature = 0
 
 # GitHub Models. Needs a PAT with the `models:read` scope.
 # Model ids are publisher/model — see https://models.github.ai/catalog/models

@@ -133,7 +133,7 @@ Nested spend is folded into `session`, so a subagent cannot bill you invisibly.
 
 ## Sessions
 
-Every turn is written to `~/.agent/sessions/<id>.jsonl` (override with
+Every turn is written to `~/.aungcode/sessions/<id>.jsonl` (override with
 `AGENT_SESSION_DIR`). Line 1 is metadata; every later line is one message.
 
 ```bash
@@ -271,6 +271,8 @@ How context, the four caps, compaction and cost fit together — with real
 numbers — is in [CONTEXT.md](CONTEXT.md).
 Known gaps in the render layer, and the options for closing them, are in
 [RENDERING.md](RENDERING.md).
+Running against a local OpenAI-compatible server — config, testing and what
+actually happened — is in [LOCAL-MODELS.md](LOCAL-MODELS.md).
 
 ## Workspace
 

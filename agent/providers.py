@@ -60,6 +60,9 @@ class ToolResult:
     is_error: bool = False
     # Terminal-only. Never sent to the API — see append_results below.
     display: str | None = None
+    # Set when the user refused the call, so the loop can spot a model that
+    # keeps re-asking for the same thing.
+    denied: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,6 +188,8 @@ class OpenAIProvider:
     ) -> Step:
         raw = None
         finish = "stop"
+        # Omitted entirely unless configured, so servers keep their own default.
+        sampling = {} if self._cfg.temperature is None else {"temperature": self._cfg.temperature}
         text: list[str] = []
         # Tool calls stream in fragments keyed by index; accumulate then parse.
         acc: dict[int, dict[str, str]] = {}
@@ -207,6 +212,7 @@ class OpenAIProvider:
                 }
                 for t in tools
             ],
+            **sampling,
             **{self._cfg.token_param: self._cfg.max_tokens},
         ) as stream:
             for chunk in stream:

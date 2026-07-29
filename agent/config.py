@@ -29,6 +29,11 @@ class ProviderConfig:
     price_out: float = 0.0
     price_cache_read: float = 0.0
     price_cache_write: float = 0.0
+    # Top-level, not per-profile: switching provider must not move sessions.
+    session_dir: str | None = None
+    # Sent only when set. Unset means "let the server decide", which is the
+    # right default — recent Claude models reject the parameter outright.
+    temperature: float | None = None
 
     @property
     def priced(self) -> bool:
@@ -85,4 +90,8 @@ def load(path: Path | None = None) -> ProviderConfig:
         price_out=float(section.get("price_out", 0)),
         price_cache_read=float(section.get("price_cache_read", 0)),
         price_cache_write=float(section.get("price_cache_write", 0)),
+        session_dir=raw.get("session_dir"),
+        temperature=(
+            float(section["temperature"]) if section.get("temperature") is not None else None
+        ),
     )

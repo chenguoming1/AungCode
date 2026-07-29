@@ -266,7 +266,7 @@ grep -l 'from .render' agent/loop.py agent/providers.py agent/tools.py agent/com
 ## Stage 12 — session persistence
 
 ```bash
-export AGENT_SESSION_DIR=/tmp/sess12   # keep test sessions out of ~/.agent
+export AGENT_SESSION_DIR=/tmp/sess12   # keep test sessions out of ~/.aungcode
 mkdir -p /tmp/ws12
 cd /Users/aungbonaing/develop/personal/Apps/AungCode
 ```

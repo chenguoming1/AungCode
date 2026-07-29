@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -13,6 +15,10 @@ log = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 100
 STREAM_RETRIES = 2
+# Identical call AND identical result, this many times in one turn, means the
+# model is stuck rather than working. Keyed on the result too, so a legitimate
+# re-read after an edit (same args, new content) is never mistaken for a loop.
+REPEAT_LIMIT = 3
 
 OnTool = Callable[[ToolCall, ToolResult], None]
 # Returns True to let the call proceed. Asked once per call, before execution.
@@ -45,6 +51,7 @@ def _execute(
             "the user denied this action. Do not retry it; explain what you "
             "wanted to do, or propose a different approach.",
             is_error=True,
+            denied=True,
         )
 
     # After approval, so a hook's side effects never fire for a call the user
@@ -113,6 +120,10 @@ def run_turn(
     registry = {t.name: t for t in tools}
     hooks = hooks or NoHooks()
     usages: list[Usage] = []
+    # A model that ignores "do not retry", or that re-runs the same call
+    # forever, would otherwise spend every remaining iteration doing it.
+    refused: set[str] = set()
+    seen: Counter[str] = Counter()
 
     for _ in range(max_iterations):
         step = _step_with_retry(provider, messages, tools, emit, system)
@@ -123,10 +134,23 @@ def run_turn(
             return TurnResult(usages, step.stop_reason)
 
         results = []
+        stop = ""
         for call in step.tool_calls:
             result = _execute(call, registry, approve, hooks)
+            signature = f"{call.name}:{json.dumps(call.args, sort_keys=True, default=str)}"
+            if result.denied:
+                if signature in refused:
+                    stop = "denied_repeat"
+                refused.add(signature)
+            else:
+                seen[f"{signature}:{hash(result.content)}"] += 1
+                if seen[f"{signature}:{hash(result.content)}"] >= REPEAT_LIMIT:
+                    stop = "repeated_calls"
             on_tool(call, result)
             results.append(result)
+        # Results are appended even when stopping, so no tool_use is orphaned.
         provider.append_results(messages, results)
+        if stop:
+            return TurnResult(usages, stop)
 
     raise MaxIterations(f"gave up after {max_iterations} tool round trips")

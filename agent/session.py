@@ -61,8 +61,27 @@ class Lock:
             self._fh = None
 
 
+DEFAULT_DIR = Path.home() / ".aungcode" / "sessions"
+
+# Set once from config at startup. Module state rather than a parameter on
+# every call site, since it never changes during a run.
+_configured: Path | None = None
+
+
+def configure(path: str | None) -> None:
+    global _configured
+    _configured = Path(path).expanduser() if path else None
+
+
 def session_dir() -> Path:
-    root = Path(os.environ.get("AGENT_SESSION_DIR", Path.home() / ".agent" / "sessions"))
+    """Environment overrides config, config overrides the default."""
+    override = os.environ.get("AGENT_SESSION_DIR")
+    if override:
+        root = Path(override).expanduser()
+    elif _configured is not None:
+        root = _configured
+    else:
+        root = DEFAULT_DIR
     root.mkdir(parents=True, exist_ok=True)
     return root
 
